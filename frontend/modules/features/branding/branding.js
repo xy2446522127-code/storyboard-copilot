@@ -7,7 +7,10 @@ function replaceText(value) {
 }
 
 function applyBranding(root = document) {
-  document.title = "花海画布";
+  // Assigning document.title creates a text mutation in <title>.  This function is also
+  // called by the page-wide MutationObserver, so an unconditional assignment would keep
+  // scheduling itself forever and prevent WebView from painting the application.
+  if (document.title !== "花海画布") document.title = "花海画布";
   if (root.nodeType === Node.TEXT_NODE) {
     root.nodeValue = replaceText(root.nodeValue);
     return;
