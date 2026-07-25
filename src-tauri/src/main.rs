@@ -62,6 +62,59 @@ struct GenerationJob {
     updated_at: String,
 }
 
+/// A chat thread is deliberately kept separate from a project export.  This keeps a
+/// shared `.storyboard` file portable and makes it impossible for an export to include
+/// the local API settings that are used to talk to a model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatSession {
+    id: String,
+    project_id: Option<String>,
+    title: String,
+    model: String,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatMessage {
+    id: String,
+    session_id: String,
+    role: String,
+    content: String,
+    context_json: String,
+    created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentPreview {
+    id: String,
+    session_id: String,
+    project_id: Option<String>,
+    actions_json: String,
+    status: String,
+    created_at: String,
+    confirmed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CanvasVideoTarget {
+    id: String,
+    name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CanvasBatchPreview {
+    project_id: String,
+    image_node_ids: Vec<String>,
+    video_targets: Vec<CanvasVideoTarget>,
+    can_create_video_node: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UpdateInfo {
@@ -642,6 +695,50 @@ fn open_projects(app: &AppHandle) -> Result<Connection, String> {
                 updated_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_generation_jobs_updated_at ON generation_jobs(updated_at DESC);
+            CREATE TABLE IF NOT EXISTS chat_sessions (
+                id TEXT PRIMARY KEY,
+                project_id TEXT,
+                title TEXT NOT NULL,
+                model TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_sessions_project_updated
+                ON chat_sessions(project_id, updated_at DESC);
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                context_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_session_created
+                ON chat_messages(session_id, created_at ASC);
+            CREATE TABLE IF NOT EXISTS agent_previews (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                project_id TEXT,
+                actions_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                confirmed_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_agent_previews_session_created
+                ON agent_previews(session_id, created_at DESC);
+            CREATE TABLE IF NOT EXISTS canvas_batch_history (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                before_nodes_json TEXT NOT NULL,
+                before_edges_json TEXT NOT NULL,
+                after_nodes_json TEXT NOT NULL,
+                after_edges_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                undone INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_canvas_batch_history_project
+                ON canvas_batch_history(project_id, undone, created_at DESC);
             ",
         )
         .map_err(|error| error.to_string())?;
@@ -1651,6 +1748,868 @@ fn insert_project(connection: &Connection, project: &ProjectRecord) -> Result<()
         )
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+fn row_to_chat_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatSession> {
+    Ok(ChatSession {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        title: row.get(2)?,
+        model: row.get(3)?,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+    })
+}
+
+fn row_to_chat_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage> {
+    Ok(ChatMessage {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        role: row.get(2)?,
+        content: row.get(3)?,
+        context_json: row.get(4)?,
+        created_at: row.get(5)?,
+    })
+}
+
+fn insert_chat_message(connection: &Connection, message: &ChatMessage) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT INTO chat_messages (id, session_id, role, content, context_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                message.id,
+                message.session_id,
+                message.role,
+                message.content,
+                message.context_json,
+                message.created_at,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "UPDATE chat_sessions SET updated_at = ?1 WHERE id = ?2",
+            params![Utc::now().to_rfc3339(), message.session_id],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn chat_response_content(value: &serde_json::Value) -> Option<String> {
+    let content = value
+        .pointer("/choices/0/message/content")
+        .or_else(|| value.pointer("/data/choices/0/message/content"))?;
+    if let Some(text) = content.as_str() {
+        return Some(text.to_string());
+    }
+    content.as_array().map(|parts| {
+        parts
+            .iter()
+            .filter_map(|part| {
+                part.get("text")
+                    .or_else(|| part.get("content"))
+                    .and_then(serde_json::Value::as_str)
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    })
+}
+
+fn sanitize_chat_context(context_json: Option<String>) -> Result<String, String> {
+    let raw = context_json.unwrap_or_else(|| "{}".to_string());
+    if raw.len() > 32_000 {
+        return Err("chat context is too large; share a smaller selection".to_string());
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|error| format!("invalid chat context: {error}"))?;
+    // A data URI would transfer the original image/audio/video.  The chat design only
+    // sends node metadata and a local media reference unless the UI adds an explicit,
+    // separately confirmed attachment feature.
+    if raw.contains("data:image/") || raw.contains("data:video/") || raw.contains("data:audio/") {
+        return Err("raw media must be attached through an explicit confirmation flow".to_string());
+    }
+    serde_json::to_string(&value).map_err(|error| error.to_string())
+}
+
+fn validate_agent_actions(actions_json: &str) -> Result<(), String> {
+    let actions: serde_json::Value = serde_json::from_str(actions_json)
+        .map_err(|error| format!("invalid agent action preview: {error}"))?;
+    let items = actions
+        .as_array()
+        .ok_or("agent action preview must be a JSON array".to_string())?;
+    if items.is_empty() || items.len() > 20 {
+        return Err("agent action preview must contain 1 to 20 actions".to_string());
+    }
+    let allowed = [
+        "createNodes",
+        "connectImagesToVideo",
+        "arrangeNodes",
+        "updateNodePrompts",
+        "generateImage",
+        "generateVideo",
+        "deleteNodes",
+    ];
+    for action in items {
+        let kind = action
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("each agent action must include a type".to_string())?;
+        if !allowed.contains(&kind) {
+            return Err(format!("agent action '{kind}' is not allowed"));
+        }
+        if !action
+            .get("params")
+            .is_some_and(serde_json::Value::is_object)
+        {
+            return Err(format!(
+                "agent action '{kind}' must use an object params field"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn node_id(node: &serde_json::Value) -> Option<&str> {
+    node.get("id").and_then(serde_json::Value::as_str)
+}
+
+fn node_text(node: &serde_json::Value) -> String {
+    let data = node.get("data").unwrap_or(node);
+    ["label", "title", "name", "displayName", "type"]
+        .iter()
+        .find_map(|key| data.get(*key).and_then(serde_json::Value::as_str))
+        .unwrap_or("生视频节点")
+        .to_string()
+}
+
+fn node_is_kind(node: &serde_json::Value, kind: &str) -> bool {
+    let node_type = node
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let data = node
+        .get("data")
+        .cloned()
+        .unwrap_or_default()
+        .to_string()
+        .to_ascii_lowercase();
+    match kind {
+        "image" => {
+            node_type.contains("image")
+                || data.contains("imageurl")
+                || data.contains("image_url")
+                || data.contains("图像")
+        }
+        "video" => {
+            node_type.contains("video")
+                || data.contains("video")
+                || data.contains("生视频")
+                || data.contains("图生视频")
+        }
+        _ => false,
+    }
+}
+
+fn node_position(node: &serde_json::Value) -> (f64, f64) {
+    let position = node.get("position").unwrap_or(&serde_json::Value::Null);
+    (
+        position
+            .get("x")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0),
+        position
+            .get("y")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0),
+    )
+}
+
+fn node_size(node: &serde_json::Value) -> (f64, f64) {
+    let measured = node.get("measured").unwrap_or(&serde_json::Value::Null);
+    (
+        node.get("width")
+            .or_else(|| measured.get("width"))
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(320.0),
+        node.get("height")
+            .or_else(|| measured.get("height"))
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(180.0),
+    )
+}
+
+fn write_project_canvas(
+    connection: &Connection,
+    project: &ProjectRecord,
+    nodes: &[serde_json::Value],
+    edges: &[serde_json::Value],
+) -> Result<ProjectRecord, String> {
+    let mut updated = project.clone();
+    updated.nodes_json = serde_json::to_string(nodes).map_err(|error| error.to_string())?;
+    updated.edges_json = serde_json::to_string(edges).map_err(|error| error.to_string())?;
+    updated.node_count = nodes.len() as u32;
+    updated.updated_at = Utc::now().to_rfc3339();
+    connection
+        .execute(
+            "UPDATE projects SET nodes_json = ?1, edges_json = ?2, node_count = ?3, updated_at = ?4 WHERE id = ?5",
+            params![
+                updated.nodes_json,
+                updated.edges_json,
+                updated.node_count,
+                updated.updated_at,
+                updated.id,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(updated)
+}
+
+fn record_canvas_batch_history(
+    connection: &Connection,
+    project_id: &str,
+    action: &str,
+    before_nodes: &[serde_json::Value],
+    before_edges: &[serde_json::Value],
+    after_nodes: &[serde_json::Value],
+    after_edges: &[serde_json::Value],
+) -> Result<(), String> {
+    connection
+        .execute(
+            "UPDATE canvas_batch_history SET undone = 0 WHERE project_id = ?1 AND undone = 1",
+            [project_id],
+        )
+        .map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "INSERT INTO canvas_batch_history
+             (id, project_id, action, before_nodes_json, before_edges_json, after_nodes_json, after_edges_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                Uuid::new_v4().to_string(),
+                project_id,
+                action,
+                serde_json::to_string(before_nodes).map_err(|error| error.to_string())?,
+                serde_json::to_string(before_edges).map_err(|error| error.to_string())?,
+                serde_json::to_string(after_nodes).map_err(|error| error.to_string())?,
+                serde_json::to_string(after_edges).map_err(|error| error.to_string())?,
+                Utc::now().to_rfc3339(),
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn list_chat_sessions(
+    app: AppHandle,
+    project_id: Option<String>,
+    lock: State<StoreLock>,
+) -> Result<Vec<ChatSession>, String> {
+    let _guard = lock
+        .0
+        .lock()
+        .map_err(|_| "project store lock poisoned".to_string())?;
+    let connection = open_projects(&app)?;
+    let mut statement = match project_id {
+        Some(_) => connection
+            .prepare("SELECT id, project_id, title, model, created_at, updated_at FROM chat_sessions WHERE project_id = ?1 ORDER BY updated_at DESC")
+            .map_err(|error| error.to_string())?,
+        None => connection
+            .prepare("SELECT id, project_id, title, model, created_at, updated_at FROM chat_sessions WHERE project_id IS NULL ORDER BY updated_at DESC")
+            .map_err(|error| error.to_string())?,
+    };
+    let rows = match project_id {
+        Some(ref id) => statement.query_map([id], row_to_chat_session),
+        None => statement.query_map([], row_to_chat_session),
+    }
+    .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn create_chat_session(
+    app: AppHandle,
+    project_id: Option<String>,
+    title: Option<String>,
+    model: Option<String>,
+    lock: State<StoreLock>,
+) -> Result<ChatSession, String> {
+    let _guard = lock
+        .0
+        .lock()
+        .map_err(|_| "project store lock poisoned".to_string())?;
+    let now = Utc::now().to_rfc3339();
+    let session = ChatSession {
+        id: Uuid::new_v4().to_string(),
+        project_id,
+        title: title
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "新对话".to_string()),
+        model: model.unwrap_or_default(),
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    open_projects(&app)?
+        .execute(
+            "INSERT INTO chat_sessions (id, project_id, title, model, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                session.id,
+                session.project_id,
+                session.title,
+                session.model,
+                session.created_at,
+                session.updated_at
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(session)
+}
+
+#[tauri::command]
+fn list_chat_messages(
+    app: AppHandle,
+    session_id: String,
+    lock: State<StoreLock>,
+) -> Result<Vec<ChatMessage>, String> {
+    let _guard = lock
+        .0
+        .lock()
+        .map_err(|_| "project store lock poisoned".to_string())?;
+    let connection = open_projects(&app)?;
+    let mut statement = connection
+        .prepare("SELECT id, session_id, role, content, context_json, created_at FROM chat_messages WHERE session_id = ?1 ORDER BY created_at ASC")
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([session_id], row_to_chat_message)
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn send_chat_message(
+    app: AppHandle,
+    session_id: String,
+    provider_id: String,
+    model: String,
+    content: String,
+    context_json: Option<String>,
+    lock: State<'_, StoreLock>,
+) -> Result<ChatMessage, String> {
+    if content.trim().is_empty() || content.len() > 24_000 {
+        return Err("chat message must contain 1 to 24000 characters".to_string());
+    }
+    let context_json = sanitize_chat_context(context_json)?;
+    let (history, user_message) = {
+        let _guard = lock
+            .0
+            .lock()
+            .map_err(|_| "project store lock poisoned".to_string())?;
+        let connection = open_projects(&app)?;
+        let session_exists: Option<String> = connection
+            .query_row(
+                "SELECT id FROM chat_sessions WHERE id = ?1",
+                [&session_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if session_exists.is_none() {
+            return Err("chat session not found".to_string());
+        }
+        let mut statement = connection
+            .prepare("SELECT id, session_id, role, content, context_json, created_at FROM chat_messages WHERE session_id = ?1 ORDER BY created_at DESC LIMIT 24")
+            .map_err(|error| error.to_string())?;
+        let mut history = statement
+            .query_map([&session_id], row_to_chat_message)
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        history.reverse();
+        let user_message = ChatMessage {
+            id: Uuid::new_v4().to_string(),
+            session_id: session_id.clone(),
+            role: "user".to_string(),
+            content,
+            context_json,
+            created_at: Utc::now().to_rfc3339(),
+        };
+        insert_chat_message(&connection, &user_message)?;
+        (history, user_message)
+    };
+
+    let (base_url, api_key) = provider_credentials(&app, &provider_id)?;
+    let endpoint = provider_endpoint(&base_url, "chat/completions")?;
+    let mut messages = vec![serde_json::json!({
+        "role": "system",
+        "content": "You are the Flower Sea Canvas assistant. Give practical, concise creative help. Never claim to have executed an action. Canvas changes, deletes and paid generation must be returned as a preview for user confirmation. You may only propose these action types: createNodes, connectImagesToVideo, arrangeNodes, updateNodePrompts, generateImage, generateVideo, deleteNodes. Do not request or reveal API keys."
+    })];
+    for message in history {
+        messages.push(serde_json::json!({"role": message.role, "content": message.content}));
+    }
+    let contextual_content = if user_message.context_json == "{}" {
+        user_message.content.clone()
+    } else {
+        format!(
+            "{}\n\nCurrent canvas metadata (no raw media): {}",
+            user_message.content, user_message.context_json
+        )
+    };
+    messages.push(serde_json::json!({"role": "user", "content": contextual_content}));
+    let response = Client::new()
+        .post(endpoint)
+        .bearer_auth(api_key)
+        .json(&serde_json::json!({"model": model, "messages": messages, "stream": false}))
+        .send()
+        .await
+        .map_err(|error| format!("chat request failed: {error}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("chat response read failed: {error}"))?;
+    if !status.is_success() {
+        return Err(format!(
+            "chat request failed ({status}): {}",
+            body.chars().take(500).collect::<String>()
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|error| format!("chat response was not JSON: {error}"))?;
+    let assistant_message = ChatMessage {
+        id: Uuid::new_v4().to_string(),
+        session_id,
+        role: "assistant".to_string(),
+        content: chat_response_content(&value)
+            .ok_or("chat response did not contain message content".to_string())?,
+        context_json: "{}".to_string(),
+        created_at: Utc::now().to_rfc3339(),
+    };
+    let _guard = lock
+        .0
+        .lock()
+        .map_err(|_| "project store lock poisoned".to_string())?;
+    insert_chat_message(&open_projects(&app)?, &assistant_message)?;
+    Ok(assistant_message)
+}
+
+#[tauri::command]
+fn create_agent_preview(
+    app: AppHandle,
+    session_id: String,
+    project_id: Option<String>,
+    actions_json: String,
+    lock: State<StoreLock>,
+) -> Result<AgentPreview, String> {
+    validate_agent_actions(&actions_json)?;
+    let _guard = lock
+        .0
+        .lock()
+        .map_err(|_| "project store lock poisoned".to_string())?;
+    let preview = AgentPreview {
+        id: Uuid::new_v4().to_string(),
+        session_id,
+        project_id,
+        actions_json,
+        status: "pending".to_string(),
+        created_at: Utc::now().to_rfc3339(),
+        confirmed_at: None,
+    };
+    open_projects(&app)?
+        .execute(
+            "INSERT INTO agent_previews (id, session_id, project_id, actions_json, status, created_at, confirmed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![preview.id, preview.session_id, preview.project_id, preview.actions_json, preview.status, preview.created_at, preview.confirmed_at],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(preview)
+}
+
+#[tauri::command]
+fn resolve_agent_preview(
+    app: AppHandle,
+    preview_id: String,
+    confirm: bool,
+    lock: State<StoreLock>,
+) -> Result<AgentPreview, String> {
+    let _guard = lock
+        .0
+        .lock()
+        .map_err(|_| "project store lock poisoned".to_string())?;
+    let connection = open_projects(&app)?;
+    let mut preview: AgentPreview = connection
+        .query_row(
+            "SELECT id, session_id, project_id, actions_json, status, created_at, confirmed_at FROM agent_previews WHERE id = ?1",
+            [&preview_id],
+            |row| Ok(AgentPreview { id: row.get(0)?, session_id: row.get(1)?, project_id: row.get(2)?, actions_json: row.get(3)?, status: row.get(4)?, created_at: row.get(5)?, confirmed_at: row.get(6)? }),
+        )
+        .map_err(|error| error.to_string())?;
+    if preview.status != "pending" {
+        return Err("agent preview has already been resolved".to_string());
+    }
+    preview.status = if confirm { "confirmed" } else { "rejected" }.to_string();
+    preview.confirmed_at = confirm.then(|| Utc::now().to_rfc3339());
+    connection
+        .execute(
+            "UPDATE agent_previews SET status = ?1, confirmed_at = ?2 WHERE id = ?3",
+            params![preview.status, preview.confirmed_at, preview.id],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(preview)
+}
+
+fn project_nodes(project: &ProjectRecord) -> Result<Vec<serde_json::Value>, String> {
+    serde_json::from_str(&project.nodes_json)
+        .map_err(|error| format!("invalid project nodes: {error}"))
+}
+
+fn project_edges(project: &ProjectRecord) -> Result<Vec<serde_json::Value>, String> {
+    serde_json::from_str(&project.edges_json)
+        .map_err(|error| format!("invalid project edges: {error}"))
+}
+
+fn selected_canvas_nodes<'a>(
+    nodes: &'a [serde_json::Value],
+    ids: &[String],
+) -> Vec<&'a serde_json::Value> {
+    nodes
+        .iter()
+        .filter(|node| node_id(node).is_some_and(|id| ids.iter().any(|selected| selected == id)))
+        .collect()
+}
+
+#[tauri::command]
+fn find_project_for_canvas_selection(
+    app: AppHandle,
+    node_ids: Vec<String>,
+    lock: State<StoreLock>,
+) -> Result<Option<String>, String> {
+    if node_ids.is_empty() {
+        return Ok(None);
+    }
+    let _guard = lock
+        .0
+        .lock()
+        .map_err(|_| "project store lock poisoned".to_string())?;
+    for project in read_projects(&app)? {
+        let nodes = project_nodes(&project)?;
+        let present: Vec<&str> = nodes.iter().filter_map(node_id).collect();
+        if node_ids
+            .iter()
+            .all(|id| present.iter().any(|present_id| present_id == id))
+        {
+            return Ok(Some(project.id));
+        }
+    }
+    Ok(None)
+}
+
+#[tauri::command]
+fn preview_canvas_batch_action(
+    app: AppHandle,
+    project_id: String,
+    selected_node_ids: Vec<String>,
+    lock: State<StoreLock>,
+) -> Result<CanvasBatchPreview, String> {
+    let _guard = lock
+        .0
+        .lock()
+        .map_err(|_| "project store lock poisoned".to_string())?;
+    let connection = open_projects(&app)?;
+    let project = get_project_record_from_db(&connection, &project_id)?
+        .ok_or("project not found".to_string())?;
+    let nodes = project_nodes(&project)?;
+    let selected = selected_canvas_nodes(&nodes, &selected_node_ids);
+    let image_node_ids = selected
+        .iter()
+        .filter(|node| node_is_kind(node, "image"))
+        .filter_map(|node| node_id(node).map(ToOwned::to_owned))
+        .collect::<Vec<_>>();
+    if image_node_ids.len() < 2 {
+        return Err("select at least two image nodes".to_string());
+    }
+    let video_targets = selected
+        .iter()
+        .filter(|node| node_is_kind(node, "video"))
+        .filter_map(|node| {
+            node_id(node).map(|id| CanvasVideoTarget {
+                id: id.to_string(),
+                name: node_text(node),
+            })
+        })
+        .collect();
+    Ok(CanvasBatchPreview {
+        project_id,
+        image_node_ids,
+        video_targets,
+        can_create_video_node: true,
+    })
+}
+
+#[tauri::command]
+fn apply_canvas_batch_action(
+    app: AppHandle,
+    project_id: String,
+    selected_node_ids: Vec<String>,
+    action: String,
+    target_video_node_id: Option<String>,
+    lock: State<StoreLock>,
+) -> Result<ProjectRecord, String> {
+    let _guard = lock
+        .0
+        .lock()
+        .map_err(|_| "project store lock poisoned".to_string())?;
+    let connection = open_projects(&app)?;
+    let project = get_project_record_from_db(&connection, &project_id)?
+        .ok_or("project not found".to_string())?;
+    let mut nodes = project_nodes(&project)?;
+    let mut edges = project_edges(&project)?;
+    let before_nodes = nodes.clone();
+    let before_edges = edges.clone();
+    let selected = selected_canvas_nodes(&nodes, &selected_node_ids);
+    let mut image_ids = selected
+        .iter()
+        .filter(|node| node_is_kind(node, "image"))
+        .filter_map(|node| node_id(node).map(ToOwned::to_owned))
+        .collect::<Vec<_>>();
+    if image_ids.len() < 2 {
+        return Err("select at least two image nodes".to_string());
+    }
+    image_ids.sort_by(|left, right| {
+        let left_node = nodes
+            .iter()
+            .find(|node| node_id(node) == Some(left.as_str()))
+            .expect("selected node exists");
+        let right_node = nodes
+            .iter()
+            .find(|node| node_id(node) == Some(right.as_str()))
+            .expect("selected node exists");
+        let left_position = node_position(left_node);
+        let right_position = node_position(right_node);
+        let primary = if action == "arrange-vertical" {
+            left_position.1.total_cmp(&right_position.1)
+        } else {
+            left_position.0.total_cmp(&right_position.0)
+        };
+        let secondary = if action == "arrange-vertical" {
+            left_position.0.total_cmp(&right_position.0)
+        } else {
+            left_position.1.total_cmp(&right_position.1)
+        };
+        primary.then(secondary).then(left.cmp(right))
+    });
+
+    match action.as_str() {
+        "arrange-horizontal" | "arrange-vertical" => {
+            let selected_images = nodes
+                .iter()
+                .filter(|node| {
+                    image_ids
+                        .iter()
+                        .any(|id| node_id(node) == Some(id.as_str()))
+                })
+                .collect::<Vec<_>>();
+            let anchor_x = selected_images
+                .iter()
+                .map(|node| node_position(node).0)
+                .fold(f64::INFINITY, f64::min);
+            let anchor_y = selected_images
+                .iter()
+                .map(|node| node_position(node).1)
+                .fold(f64::INFINITY, f64::min);
+            let mut cursor_x = anchor_x;
+            let mut cursor_y = anchor_y;
+            for id in &image_ids {
+                let node = nodes
+                    .iter_mut()
+                    .find(|node| node_id(node) == Some(id.as_str()))
+                    .expect("selected node exists");
+                let size = node_size(node);
+                let position = node
+                    .as_object_mut()
+                    .ok_or("canvas node must be an object".to_string())?
+                    .entry("position")
+                    .or_insert_with(|| serde_json::json!({}));
+                let position = position
+                    .as_object_mut()
+                    .ok_or("canvas node position must be an object".to_string())?;
+                position.insert("x".to_string(), serde_json::json!(cursor_x));
+                position.insert("y".to_string(), serde_json::json!(cursor_y));
+                if action == "arrange-horizontal" {
+                    cursor_x += size.0 + 48.0;
+                } else {
+                    cursor_y += size.1 + 48.0;
+                }
+            }
+        }
+        "connect-video" => {
+            let selected_videos = selected
+                .iter()
+                .filter(|node| node_is_kind(node, "video"))
+                .filter_map(|node| node_id(node).map(ToOwned::to_owned))
+                .collect::<Vec<_>>();
+            let target_id = match (target_video_node_id, selected_videos.len()) {
+                (Some(target), _) if selected_videos.iter().any(|id| id == &target) => target,
+                (Some(_), _) => {
+                    return Err("chosen video node is not part of the selection".to_string())
+                }
+                (None, 0) => {
+                    let max_x = nodes
+                        .iter()
+                        .map(|node| node_position(node).0 + node_size(node).0)
+                        .fold(0.0, f64::max);
+                    let top_y = image_ids
+                        .iter()
+                        .filter_map(|id| {
+                            nodes.iter().find(|node| node_id(node) == Some(id.as_str()))
+                        })
+                        .map(|node| node_position(node).1)
+                        .fold(f64::INFINITY, f64::min);
+                    let video_type = nodes
+                        .iter()
+                        .find(|node| node_is_kind(node, "video"))
+                        .and_then(|node| node.get("type"))
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!("video"));
+                    let created_id = format!("video-{}", Uuid::new_v4());
+                    nodes.push(serde_json::json!({
+                        "id": created_id,
+                        "type": video_type,
+                        "position": {"x": max_x + 48.0, "y": if top_y.is_finite() { top_y } else { 0.0 }},
+                        "data": {"label": "批量图生视频", "displayName": "批量图生视频", "videoMode": "image2video", "referenceImageNodeIds": image_ids}
+                    }));
+                    node_id(nodes.last().expect("new node exists"))
+                        .expect("new node id exists")
+                        .to_string()
+                }
+                (None, 1) => selected_videos[0].clone(),
+                (None, _) => {
+                    return Err("multiple video nodes selected; choose one target".to_string())
+                }
+            };
+            for image_id in &image_ids {
+                let duplicate = edges.iter().any(|edge| {
+                    edge.get("source").and_then(serde_json::Value::as_str)
+                        == Some(image_id.as_str())
+                        && edge.get("target").and_then(serde_json::Value::as_str)
+                            == Some(target_id.as_str())
+                });
+                if !duplicate {
+                    edges.push(serde_json::json!({
+                        "id": format!("batch-edge-{}", Uuid::new_v4()),
+                        "source": image_id,
+                        "target": target_id,
+                        "type": "smoothstep"
+                    }));
+                }
+            }
+            if let Some(video) = nodes
+                .iter_mut()
+                .find(|node| node_id(node) == Some(target_id.as_str()))
+            {
+                let data = video
+                    .as_object_mut()
+                    .ok_or("canvas video node must be an object".to_string())?
+                    .entry("data")
+                    .or_insert_with(|| serde_json::json!({}));
+                let data = data
+                    .as_object_mut()
+                    .ok_or("canvas video data must be an object".to_string())?;
+                data.insert(
+                    "referenceImageNodeIds".to_string(),
+                    serde_json::json!(image_ids),
+                );
+                data.insert(
+                    "requiresMultiReferenceConfirmation".to_string(),
+                    serde_json::json!(true),
+                );
+            }
+        }
+        _ => return Err("unsupported canvas batch action".to_string()),
+    }
+    let updated = write_project_canvas(&connection, &project, &nodes, &edges)?;
+    record_canvas_batch_history(
+        &connection,
+        &project_id,
+        &action,
+        &before_nodes,
+        &before_edges,
+        &nodes,
+        &edges,
+    )?;
+    Ok(updated)
+}
+
+#[tauri::command]
+fn undo_last_canvas_batch_action(
+    app: AppHandle,
+    project_id: String,
+    lock: State<StoreLock>,
+) -> Result<ProjectRecord, String> {
+    let _guard = lock
+        .0
+        .lock()
+        .map_err(|_| "project store lock poisoned".to_string())?;
+    let connection = open_projects(&app)?;
+    let (history_id, nodes_json, edges_json): (String, String, String) = connection
+        .query_row(
+            "SELECT id, before_nodes_json, before_edges_json FROM canvas_batch_history WHERE project_id = ?1 AND undone = 0 ORDER BY created_at DESC LIMIT 1",
+            [&project_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|_| "no canvas batch action to undo".to_string())?;
+    let project = get_project_record_from_db(&connection, &project_id)?
+        .ok_or("project not found".to_string())?;
+    let nodes: Vec<serde_json::Value> =
+        serde_json::from_str(&nodes_json).map_err(|error| error.to_string())?;
+    let edges: Vec<serde_json::Value> =
+        serde_json::from_str(&edges_json).map_err(|error| error.to_string())?;
+    let updated = write_project_canvas(&connection, &project, &nodes, &edges)?;
+    connection
+        .execute(
+            "UPDATE canvas_batch_history SET undone = 1 WHERE id = ?1",
+            [history_id],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(updated)
+}
+
+#[tauri::command]
+fn redo_last_canvas_batch_action(
+    app: AppHandle,
+    project_id: String,
+    lock: State<StoreLock>,
+) -> Result<ProjectRecord, String> {
+    let _guard = lock
+        .0
+        .lock()
+        .map_err(|_| "project store lock poisoned".to_string())?;
+    let connection = open_projects(&app)?;
+    let (history_id, nodes_json, edges_json): (String, String, String) = connection
+        .query_row(
+            "SELECT id, after_nodes_json, after_edges_json FROM canvas_batch_history WHERE project_id = ?1 AND undone = 1 ORDER BY created_at ASC LIMIT 1",
+            [&project_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|_| "no canvas batch action to redo".to_string())?;
+    let project = get_project_record_from_db(&connection, &project_id)?
+        .ok_or("project not found".to_string())?;
+    let nodes: Vec<serde_json::Value> =
+        serde_json::from_str(&nodes_json).map_err(|error| error.to_string())?;
+    let edges: Vec<serde_json::Value> =
+        serde_json::from_str(&edges_json).map_err(|error| error.to_string())?;
+    let updated = write_project_canvas(&connection, &project, &nodes, &edges)?;
+    connection
+        .execute(
+            "UPDATE canvas_batch_history SET undone = 0 WHERE id = ?1",
+            [history_id],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(updated)
 }
 
 #[tauri::command]
@@ -2691,6 +3650,17 @@ fn main() {
             update_project_viewport_record,
             export_project_to_file,
             import_project_from_file,
+            list_chat_sessions,
+            create_chat_session,
+            list_chat_messages,
+            send_chat_message,
+            create_agent_preview,
+            resolve_agent_preview,
+            find_project_for_canvas_selection,
+            preview_canvas_batch_action,
+            apply_canvas_batch_action,
+            undo_last_canvas_batch_action,
+            redo_last_canvas_batch_action,
             set_api_key,
             get_api_key,
             set_base_url,

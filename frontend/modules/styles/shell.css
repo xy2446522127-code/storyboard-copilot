@@ -1,0 +1,22 @@
+#huahai-module-root button,
+#huahai-module-root input,
+#huahai-module-root select,
+#huahai-module-root textarea { font: inherit; }
+
+#huahai-module-root button { -webkit-app-region: no-drag; }
+
+body:has(#huahai-sidebar) #root {
+  transition: margin-left 180ms ease, width 180ms ease;
+}
+
+body.huahai-sidebar-open:not(.huahai-canvas-active) #root {
+  margin-left: 264px;
+  width: calc(100% - 264px);
+}
+
+@media (max-width: 900px) {
+  body.huahai-sidebar-open:not(.huahai-canvas-active) #root {
+    margin-left: 0;
+    width: 100%;
+  }
+}

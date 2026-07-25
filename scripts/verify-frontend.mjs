@@ -1,11 +1,12 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
 const assets = [
   "frontend/index.html",
-  "frontend/branding.js",
-  "frontend/update.js",
+  "frontend/huahai-canvas.png",
+  "frontend/modules/app-shell.js",
+  "frontend/modules/shared/tauri.js",
   "frontend/assets/index-DTdX5WAD.js",
   "frontend/assets/index-Du98eh5K.css",
   "frontend/assets/window-CIyEo8f3.js",
@@ -19,11 +20,20 @@ for (const file of assets) {
   if (content.length === 0) throw new Error(`${file} is empty`);
 }
 
-for (const script of ["frontend/assets/index-DTdX5WAD.js", "frontend/branding.js", "frontend/update.js"]) {
-  const content = readFileSync(resolve(root, script), "utf8");
+function walkScripts(directory) {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const path = resolve(directory, entry.name);
+    if (entry.isDirectory()) return walkScripts(path);
+    return entry.name.endsWith(".js") ? [path] : [];
+  });
+}
+
+const scripts = [resolve(root, "frontend/assets/index-DTdX5WAD.js"), ...walkScripts(resolve(root, "frontend/modules"))];
+for (const script of scripts) {
+  const content = readFileSync(script, "utf8");
   if (/sk-[a-f0-9]{32}/i.test(content)) {
     throw new Error(`${script} still contains an embedded API key.`);
   }
 }
 
-console.log("Recovered frontend assets and credential scan passed.");
+console.log(`Recovered frontend assets, ${scripts.length - 1} modules, and credential scan passed.`);

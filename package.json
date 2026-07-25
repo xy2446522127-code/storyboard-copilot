@@ -4,6 +4,7 @@
   "private": false,
   "type": "module",
   "scripts": {
-    "verify:frontend": "node scripts/verify-frontend.mjs && node scripts/audit-static-assets.mjs"
+    "verify:frontend": "node scripts/verify-frontend.mjs && node scripts/audit-static-assets.mjs",
+    "verify:commands": "node scripts/audit-command-coverage.mjs"
   }
 }

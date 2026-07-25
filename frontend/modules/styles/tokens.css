@@ -1,0 +1,40 @@
+:root {
+  --hh-bg: #0b0d12;
+  --hh-surface: #111722;
+  --hh-surface-raised: #19202c;
+  --hh-border: rgba(166, 181, 207, 0.2);
+  --hh-text: #f4f7fb;
+  --hh-muted: #9aa8bd;
+  --hh-primary: #6c8ff0;
+  --hh-primary-strong: #5578df;
+  --hh-danger: #e46e73;
+  --hh-radius: 14px;
+  --hh-shadow: 0 18px 48px rgba(0, 0, 0, 0.38);
+  --hh-z-sidebar: 2147483500;
+  --hh-z-overlay: 2147483501;
+  font-family: Inter, "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+}
+
+.huahai-toast-stack {
+  position: fixed;
+  right: 20px;
+  bottom: 72px;
+  z-index: 2147483647;
+  display: grid;
+  gap: 8px;
+  max-width: min(380px, calc(100vw - 36px));
+}
+
+.huahai-toast {
+  padding: 10px 13px;
+  border: 1px solid var(--hh-border);
+  border-radius: 10px;
+  color: var(--hh-text);
+  background: #1d2635;
+  box-shadow: var(--hh-shadow);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.huahai-toast--error { background: #74252a; }
+.huahai-toast--success { background: #185c4c; }

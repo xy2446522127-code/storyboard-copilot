@@ -1,0 +1,24 @@
+#huahai-canvas-batch-tools {
+  position: fixed;
+  z-index: var(--hh-z-overlay);
+  left: 50%;
+  bottom: 26px;
+  display: none;
+  gap: 7px;
+  padding: 8px;
+  border: 1px solid var(--hh-border);
+  border-radius: 12px;
+  color: var(--hh-text);
+  background: rgba(20, 27, 38, .97);
+  box-shadow: var(--hh-shadow);
+  transform: translateX(-50%);
+}
+
+#huahai-canvas-batch-tools.is-visible { display: flex; }
+#huahai-canvas-batch-tools button { padding: 8px 11px; border: 1px solid var(--hh-border); border-radius: 8px; color: var(--hh-text); background: var(--hh-surface-raised); cursor: pointer; white-space: nowrap; }
+#huahai-canvas-batch-tools button[data-batch-action="connect-video"] { border-color: #6584de; background: #334f9f; }
+#huahai-canvas-batch-tools button:hover { background: #405064; }
+
+@media (max-width: 700px) {
+  #huahai-canvas-batch-tools { max-width: calc(100vw - 24px); flex-wrap: wrap; justify-content: center; }
+}
