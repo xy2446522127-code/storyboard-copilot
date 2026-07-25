@@ -6,6 +6,7 @@ const state = { route: "projects", projects: [], currentProject: null, sessions:
 const escapeHtml = (value = "") => String(value).replace(/[&<>'"]/g, (char) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", "'":"&#39;", '"':"&quot;" })[char]);
 const formatDate = (value) => value ? new Date(value).toLocaleString() : "—";
 const parseJson = (value, fallback) => { try { const parsed = JSON.parse(value); return parsed ?? fallback; } catch { return fallback; } };
+function actionPreview(content) { const match = String(content || "").match(/```(?:json)?\s*(\[[\s\S]*?\])\s*```/i); if (!match) return null; const actions = parseJson(match[1], null); return Array.isArray(actions) ? actions : null; }
 
 function shell(page) {
   const route = state.route;
@@ -25,7 +26,7 @@ function imagePage() {
 
 function chatPage() {
   const sessionButtons = state.sessions.map((session) => `<button data-session="${session.id}" class="${state.session?.id === session.id ? "is-active" : ""}">${escapeHtml(session.title)}</button>`).join("") || `<p class="hh-empty">尚无会话</p>`;
-  const messages = (state.messages || []).map((message) => `<article class="hh-message hh-message--${message.role === "user" ? "user" : "assistant"}">${escapeHtml(message.content)}</article>`).join("") || `<p class="hh-empty">开始一个对话。默认只会发送当前项目摘要和选中节点文本。</p>`;
+  const messages = (state.messages || []).map((message, index) => { const actions = message.role === "assistant" ? actionPreview(message.content) : null; const preview = actions && state.currentProject ? `<button data-agent-preview="${index}">查看 ${actions.length} 项操作预览</button>` : ""; return `<article class="hh-message hh-message--${message.role === "user" ? "user" : "assistant"}">${escapeHtml(message.content)}${preview}</article>`; }).join("") || `<p class="hh-empty">开始一个对话。默认只会发送当前项目摘要和选中节点文本。</p>`;
   return `<section class="hh-page hh-chat"><aside class="hh-card hh-chat__sessions"><button class="hh-button--primary" data-action="new-chat">＋ 新建会话</button>${sessionButtons}</aside><section class="hh-card"><header class="hh-page__head" style="padding:16px 20px;margin:0"><div><h1 style="font-size:21px">GPT 对话</h1><p>${state.currentProject ? `当前项目：${escapeHtml(state.currentProject.name)}` : "通用会话"}</p></div></header><div class="hh-chat__messages">${messages}</div><form class="hh-chat__composer" data-form="chat"><label class="hh-field">通道 ID<input name="provider" placeholder="API 设置中的通道 ID" required></label><label class="hh-field">模型<input name="model" placeholder="模型名称" required></label><label class="hh-field"><textarea name="content" required placeholder="输入创作需求…"></textarea></label><label class="hh-field"><span><input type="checkbox" name="context" checked> 附带当前项目摘要与已选节点文本（不发送原图）</span></label><div class="hh-actions"><button class="hh-button--primary" type="submit">发送</button><button type="button" data-action="cancel-chat">取消等待</button></div></form></section></section>`;
 }
 
@@ -58,6 +59,7 @@ function bind(root) {
   root.querySelector("[data-action=announcements]")?.addEventListener("click", () => window.dispatchEvent(new CustomEvent("huahai:open-announcements")));
   root.querySelector("[data-action=homepage]")?.addEventListener("click", () => window.open(projectHomepage, "_blank", "noopener,noreferrer"));
   root.querySelector("[data-action=new-project]")?.addEventListener("click", async () => { const name = window.prompt("项目名称", "未命名项目"); if (!name?.trim()) return; await saveProject({ id: crypto.randomUUID(), name: name.trim(), nodesJson: "[]", edgesJson: "[]", viewportJson: "{}", historyJson: "[]", imagePoolJson: "[]", nodeCount: 0 }); state.route = "canvas"; render(root); });
+  root.querySelector("[data-action=import-project]")?.addEventListener("click", async () => { const filePath = window.prompt("输入要导入的项目文件完整路径（建议位于 F 盘）"); if (!filePath?.trim()) return; try { const project = await invoke("import_project_from_file", { filePath: filePath.trim() }); state.currentProject = project; await loadProjects(); state.route = "canvas"; render(root); toast("项目已导入。", "success"); } catch (error) { toast(`导入失败：${String(error)}`, "error"); } });
   root.querySelectorAll("[data-open-project]").forEach((button) => button.addEventListener("click", async () => { state.currentProject = await invoke("get_project_record", { id: button.dataset.openProject }); state.route = "canvas"; state.selection.clear(); render(root); }));
   root.querySelectorAll("[data-rename-project]").forEach((button) => button.addEventListener("click", async () => { const project = state.projects.find((item) => item.id === button.dataset.renameProject); const name = window.prompt("新的项目名称", project?.name || ""); if (name?.trim()) { await invoke("rename_project_record", { id: button.dataset.renameProject, name: name.trim() }); await loadProjects(); render(root); } }));
   root.querySelectorAll("[data-delete-project]").forEach((button) => button.addEventListener("click", async () => { if (!window.confirm("删除项目记录？此操作不会删除已导出的文件。")) return; await invoke("delete_project_record", { id: button.dataset.deleteProject }); if (state.currentProject?.id === button.dataset.deleteProject) state.currentProject = null; await loadProjects(); render(root); }));
@@ -72,6 +74,7 @@ function bind(root) {
   root.querySelector("[data-action=new-chat]")?.addEventListener("click", async () => { state.session = await invoke("create_chat_session", { projectId: state.currentProject?.id || null, title: "新对话", model: "" }); await loadChat(); render(root); });
   root.querySelectorAll("[data-session]").forEach((button) => button.addEventListener("click", async () => { state.session = state.sessions.find((item) => item.id === button.dataset.session); state.messages = await invoke("list_chat_messages", { sessionId: state.session.id }); render(root); }));
   root.querySelector("[data-form=chat]")?.addEventListener("submit", async (event) => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); if (!state.session) state.session = await invoke("create_chat_session", { projectId: state.currentProject?.id || null, title: String(data.content).slice(0, 32), model: data.model }); const context = data.context ? selectedContext() : {}; try { const reply = await invoke("send_chat_message", { sessionId: state.session.id, providerId: data.provider, model: data.model, content: data.content, contextJson: JSON.stringify(context) }); state.messages = [...(state.messages || []), { role: "user", content: data.content }, reply]; event.currentTarget.reset(); render(root); } catch (error) { toast(`对话失败：${String(error)}`, "error"); } });
+  root.querySelectorAll("[data-agent-preview]").forEach((button) => button.addEventListener("click", async () => { const actions = actionPreview(state.messages[Number(button.dataset.agentPreview)]?.content); if (!actions || !state.session || !state.currentProject) return; const paid = actions.some((action) => ["generateImage", "generateVideo", "deleteNodes"].includes(action.type)); const description = actions.map((action, index) => `${index + 1}. ${action.type}`).join("\n"); if (!window.confirm(`操作预览（仅确认后执行）：\n${description}\n\n${paid ? "包含删除或可能收费的动作，将额外限制执行。" : "可在画布历史中撤销。"}`)) return; try { const preview = await invoke("create_agent_preview", { sessionId: state.session.id, projectId: state.currentProject.id, actionsJson: JSON.stringify(actions) }); await invoke("resolve_agent_preview", { previewId: preview.id, confirm: true }); const execution = await invoke("execute_agent_preview", { previewId: preview.id }); state.currentProject = execution.project; state.route = "canvas"; render(root); toast("已执行确认的安全画布操作，可撤销。", "success"); } catch (error) { toast(`预览已保留，未执行：${String(error)}`, "info"); } }));
 }
 
 async function pollImageJob(root, jobId) { for (let attempt = 0; attempt < 120; attempt += 1) { const job = await invoke("get_generate_image_job", { jobId }); state.generated = job; render(root); if (job.status === "succeeded" || job.status === "failed") { if (job.status === "failed") toast(job.error || "图片生成失败", "error"); return; } await new Promise((resolve) => setTimeout(resolve, 2000)); } toast("生成任务超时，请稍后在服务端查看。", "error"); }
@@ -89,13 +92,31 @@ function bindCanvas(root) {
   root.querySelector("[data-action=add-video]")?.addEventListener("click", async () => { await addCanvasNode("video", { label: "生视频", videoMode: "image2video" }); render(root); });
   root.querySelector("[data-action=clear-selection]")?.addEventListener("click", () => { state.selection.clear(); render(root); });
   root.querySelector("[data-action=save-canvas]")?.addEventListener("click", async () => { await saveProject(state.currentProject); toast("画布已保存。", "success"); });
+  root.querySelector("[data-action=export-project]")?.addEventListener("click", async () => { const fallback = `F:\\Huahaihuabu\\花海画布\\exports\\${state.currentProject.name || "project"}.json`; const filePath = window.prompt("导出文件完整路径", fallback); if (!filePath?.trim()) return; try { await invoke("export_project_to_file", { projectId: state.currentProject.id, filePath: filePath.trim() }); toast("项目已导出。", "success"); } catch (error) { toast(`导出失败：${String(error)}`, "error"); } });
   root.querySelector("[data-action=connect-video]")?.addEventListener("click", () => batchAction(root, "connect-video"));
   root.querySelector("[data-action=arrange-horizontal]")?.addEventListener("click", () => batchAction(root, "arrange-horizontal"));
   root.querySelector("[data-action=arrange-vertical]")?.addEventListener("click", () => batchAction(root, "arrange-vertical"));
   root.querySelector("[data-action=undo-batch]")?.addEventListener("click", () => historyAction(root, "undo_last_canvas_batch_action"));
   root.querySelector("[data-action=redo-batch]")?.addEventListener("click", () => historyAction(root, "redo_last_canvas_batch_action"));
 }
-async function batchAction(root, action) { try { const ids = [...state.selection]; const result = await invoke("apply_canvas_batch_action", { projectId: state.currentProject.id, selectedNodeIds: ids, action, targetVideoNodeId: null }); state.currentProject = result; await loadProjects(); render(root); toast("批量操作已保存，可撤销。", "success"); } catch (error) { toast(`批量操作未执行：${String(error)}`, "error"); } }
+async function batchAction(root, action) {
+  try {
+    const ids = [...state.selection];
+    const preview = await invoke("preview_canvas_batch_action", { projectId: state.currentProject.id, selectedNodeIds: ids });
+    let targetVideoNodeId = null;
+    if (action === "connect-video") {
+      if (preview.videoTargets.length > 1) {
+        const choices = preview.videoTargets.map((target, index) => `${index + 1}. ${target.name}`).join("\n");
+        const choice = Number(window.prompt(`选择生视频目标：\n${choices}`, "1"));
+        if (!Number.isInteger(choice) || !preview.videoTargets[choice - 1]) return;
+        targetVideoNodeId = preview.videoTargets[choice - 1].id;
+      }
+      if (!window.confirm("将建立批量连线。若未选中生视频节点，会创建一个新节点；重复边会自动跳过。实际视频生成前仍需确认模型是否支持多参考图。继续吗？")) return;
+    }
+    const result = await invoke("apply_canvas_batch_action", { projectId: state.currentProject.id, selectedNodeIds: ids, action, targetVideoNodeId });
+    state.currentProject = result; await loadProjects(); render(root); toast("批量操作已保存，可撤销。", "success");
+  } catch (error) { toast(`批量操作未执行：${String(error)}`, "error"); }
+}
 async function historyAction(root, command) { try { state.currentProject = await invoke(command, { projectId: state.currentProject.id }); render(root); } catch (error) { toast(String(error), "info"); } }
 
 export function installWorkspace({ openAnnouncements }) {

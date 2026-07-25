@@ -140,6 +140,13 @@ struct AgentPreview {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct AgentExecution {
+    preview: AgentPreview,
+    project: ProjectRecord,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct CanvasVideoTarget {
     id: String,
     name: String,
@@ -2313,6 +2320,105 @@ fn resolve_agent_preview(
     Ok(preview)
 }
 
+#[tauri::command]
+fn execute_agent_preview(
+    app: AppHandle,
+    preview_id: String,
+    lock: State<StoreLock>,
+) -> Result<AgentExecution, String> {
+    let _guard = lock
+        .0
+        .lock()
+        .map_err(|_| "project store lock poisoned".to_string())?;
+    let connection = open_projects(&app)?;
+    let mut preview: AgentPreview = connection
+        .query_row(
+            "SELECT id, session_id, project_id, actions_json, status, created_at, confirmed_at FROM agent_previews WHERE id = ?1",
+            [&preview_id],
+            |row| Ok(AgentPreview { id: row.get(0)?, session_id: row.get(1)?, project_id: row.get(2)?, actions_json: row.get(3)?, status: row.get(4)?, created_at: row.get(5)?, confirmed_at: row.get(6)? }),
+        )
+        .map_err(|error| error.to_string())?;
+    if preview.status != "confirmed" {
+        return Err("agent preview must be confirmed before it can execute".to_string());
+    }
+    let project_id = preview
+        .project_id
+        .clone()
+        .ok_or("a project is required for canvas actions".to_string())?;
+    let actions: Vec<serde_json::Value> = serde_json::from_str(&preview.actions_json)
+        .map_err(|error| format!("invalid confirmed agent preview: {error}"))?;
+    if actions.iter().any(|action| matches!(action.get("type").and_then(serde_json::Value::as_str), Some("generateImage") | Some("generateVideo"))) {
+        return Err("paid generation is not executed by an agent preview; use the generation form for a second confirmation".to_string());
+    }
+    if actions.iter().any(|action| action.get("type").and_then(serde_json::Value::as_str) == Some("connectImagesToVideo")) {
+        return Err("use the canvas multi-image connection toolbar to choose a target video node explicitly".to_string());
+    }
+    let project = get_project_record_from_db(&connection, &project_id)?
+        .ok_or("project not found".to_string())?;
+    let mut nodes = project_nodes(&project)?;
+    let mut edges = project_edges(&project)?;
+    let before_nodes = nodes.clone();
+    let before_edges = edges.clone();
+    for action in actions {
+        let kind = action.get("type").and_then(serde_json::Value::as_str).unwrap_or_default();
+        let params = action.get("params").and_then(serde_json::Value::as_object).ok_or("agent action params are required".to_string())?;
+        match kind {
+            "createNodes" => {
+                let items = params.get("nodes").and_then(serde_json::Value::as_array).ok_or("createNodes requires params.nodes".to_string())?;
+                if items.len() > 20 { return Err("agent preview cannot create more than 20 nodes".to_string()); }
+                for (index, item) in items.iter().enumerate() {
+                    let requested_type = item.get("type").and_then(serde_json::Value::as_str).unwrap_or("text");
+                    if !matches!(requested_type, "text" | "image" | "video") { return Err("agent nodes must be text, image, or video".to_string()); }
+                    let label = item.get("label").and_then(serde_json::Value::as_str).unwrap_or(requested_type).chars().take(160).collect::<String>();
+                    let prompt = item.get("prompt").and_then(serde_json::Value::as_str).unwrap_or_default().chars().take(4000).collect::<String>();
+                    let x = item.get("x").and_then(serde_json::Value::as_f64).unwrap_or(80.0 + index as f64 * 36.0).clamp(-100_000.0, 100_000.0);
+                    let y = item.get("y").and_then(serde_json::Value::as_f64).unwrap_or(80.0 + index as f64 * 36.0).clamp(-100_000.0, 100_000.0);
+                    nodes.push(serde_json::json!({"id": format!("agent-{}", Uuid::new_v4()), "type": requested_type, "position": {"x": x, "y": y}, "data": {"label": label, "prompt": prompt}}));
+                }
+            }
+            "updateNodePrompts" => {
+                let updates = params.get("updates").and_then(serde_json::Value::as_array).ok_or("updateNodePrompts requires params.updates".to_string())?;
+                for update in updates.iter().take(50) {
+                    let id = update.get("id").and_then(serde_json::Value::as_str).ok_or("prompt update requires id".to_string())?;
+                    let prompt = update.get("prompt").and_then(serde_json::Value::as_str).ok_or("prompt update requires prompt".to_string())?.chars().take(4000).collect::<String>();
+                    if let Some(node) = nodes.iter_mut().find(|node| node_id(node) == Some(id)) {
+                        let data = node.as_object_mut().ok_or("canvas node must be an object".to_string())?.entry("data").or_insert_with(|| serde_json::json!({}));
+                        data.as_object_mut().ok_or("canvas node data must be an object".to_string())?.insert("prompt".to_string(), serde_json::Value::String(prompt));
+                    }
+                }
+            }
+            "deleteNodes" => {
+                let ids = params.get("ids").and_then(serde_json::Value::as_array).ok_or("deleteNodes requires params.ids".to_string())?.iter().filter_map(serde_json::Value::as_str).collect::<Vec<_>>();
+                nodes.retain(|node| !node_id(node).is_some_and(|id| ids.contains(&id)));
+                edges.retain(|edge| !edge.get("source").and_then(serde_json::Value::as_str).is_some_and(|id| ids.contains(&id)) && !edge.get("target").and_then(serde_json::Value::as_str).is_some_and(|id| ids.contains(&id)));
+            }
+            "arrangeNodes" => {
+                let ids = params.get("ids").and_then(serde_json::Value::as_array).ok_or("arrangeNodes requires params.ids".to_string())?.iter().filter_map(serde_json::Value::as_str).collect::<Vec<_>>();
+                let vertical = params.get("direction").and_then(serde_json::Value::as_str) == Some("vertical");
+                let mut selected = nodes.iter_mut().filter(|node| node_id(node).is_some_and(|id| ids.contains(&id))).collect::<Vec<_>>();
+                selected.sort_by(|left, right| { let a = node_position(left); let b = node_position(right); if vertical { a.1.total_cmp(&b.1).then(a.0.total_cmp(&b.0)) } else { a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)) } });
+                let anchor_x = selected.iter().map(|node| node_position(node).0).fold(f64::INFINITY, f64::min);
+                let anchor_y = selected.iter().map(|node| node_position(node).1).fold(f64::INFINITY, f64::min);
+                let mut cursor = if vertical { anchor_y } else { anchor_x };
+                for node in selected {
+                    let size = node_size(node);
+                    let position = node.as_object_mut().ok_or("canvas node must be an object".to_string())?.entry("position").or_insert_with(|| serde_json::json!({}));
+                    let position = position.as_object_mut().ok_or("canvas node position must be an object".to_string())?;
+                    position.insert("x".to_string(), serde_json::json!(if vertical { anchor_x } else { cursor }));
+                    position.insert("y".to_string(), serde_json::json!(if vertical { cursor } else { anchor_y }));
+                    cursor += if vertical { size.1 } else { size.0 } + 48.0;
+                }
+            }
+            _ => return Err(format!("agent action '{kind}' cannot be executed")),
+        }
+    }
+    let updated = write_project_canvas(&connection, &project, &nodes, &edges)?;
+    record_canvas_batch_history(&connection, &project_id, "agent-preview", &before_nodes, &before_edges, &nodes, &edges)?;
+    preview.status = "executed".to_string();
+    connection.execute("UPDATE agent_previews SET status = ?1 WHERE id = ?2", params![preview.status, preview.id]).map_err(|error| error.to_string())?;
+    Ok(AgentExecution { preview, project: updated })
+}
+
 fn project_nodes(project: &ProjectRecord) -> Result<Vec<serde_json::Value>, String> {
     serde_json::from_str(&project.nodes_json)
         .map_err(|error| format!("invalid project nodes: {error}"))
@@ -3721,6 +3827,7 @@ fn main() {
             send_chat_message,
             create_agent_preview,
             resolve_agent_preview,
+            execute_agent_preview,
             find_project_for_canvas_selection,
             preview_canvas_batch_action,
             apply_canvas_batch_action,
