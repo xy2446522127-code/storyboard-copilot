@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "知瑶画布",
-  "version": "5.5.0-recovered.0",
+  "productName": "花海画布",
+  "version": "5.6.0",
   "identifier": "cc.zhiyao.storyboard-copilot",
   "build": {
     "frontendDist": "../frontend"
@@ -9,7 +9,7 @@
   "app": {
     "windows": [
       {
-        "title": "知瑶画布",
+        "title": "花海画布",
         "width": 1280,
         "height": 800,
         "minWidth": 960,
@@ -22,7 +22,33 @@
     }
   },
   "bundle": {
-    "active": false,
-    "resources": ["../tools/jimeng_browser.py"]
+    "active": true,
+    "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
+    "icon": ["icons/huahai-canvas.ico", "icons/huahai-canvas.png"],
+    "resources": ["../tools/jimeng_browser.py"],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese", "English"],
+        "installerIcon": "icons/huahai-canvas.ico",
+        "uninstallerIcon": "icons/huahai-canvas.ico"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlERkMwQjM2NTY2NDBFNDEKUldSQkRtUldOZ3Y4blg4emVLUGhiQVdNTTIrK3VaRkIxNUlsOUFzNVF4Q25kTUVjT3BwRnBVZ1gK",
+      "endpoints": [
+        "https://github.com/xy2446522127-code/storyboard-copilot/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

@@ -13,6 +13,7 @@ use std::{
     sync::Mutex,
 };
 use tauri::{AppHandle, Manager, State, WebviewWindow};
+use tauri_plugin_updater::UpdaterExt;
 use uuid::Uuid;
 
 #[derive(Default)]
@@ -59,6 +60,15 @@ struct GenerationJob {
     error: Option<String>,
     remote_job_id: Option<String>,
     updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateInfo {
+    current_version: String,
+    version: String,
+    date: Option<String>,
+    notes: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -2560,6 +2570,39 @@ fn validate_save_dir(path: String) -> bool {
 }
 
 #[tauri::command]
+async fn check_for_update(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
+    let update = app
+        .updater()
+        .map_err(|error| format!("无法初始化更新服务：{error}"))?
+        .check()
+        .await
+        .map_err(|error| format!("检查更新失败：{error}"))?;
+
+    Ok(update.map(|update| UpdateInfo {
+        current_version: update.current_version,
+        version: update.version,
+        date: update.date.map(|date| date.to_string()),
+        notes: update.body,
+    }))
+}
+
+#[tauri::command]
+async fn install_available_update(app: AppHandle) -> Result<(), String> {
+    let update = app
+        .updater()
+        .map_err(|error| format!("无法初始化更新服务：{error}"))?
+        .check()
+        .await
+        .map_err(|error| format!("检查更新失败：{error}"))?
+        .ok_or_else(|| "当前已是最新版本。".to_string())?;
+
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|error| format!("下载或验证更新失败：{error}"))
+}
+
+#[tauri::command]
 fn minimize_window(window: WebviewWindow) -> Result<(), String> {
     window.minimize().map_err(|error| error.to_string())
 }
@@ -2613,6 +2656,7 @@ fn query_task_token(
 fn main() {
     tauri::Builder::default()
         .manage(StoreLock::default())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             list_assets,
             add_asset,
@@ -2685,6 +2729,8 @@ fn main() {
             jimeng_get_video_status,
             get_default_save_dir,
             validate_save_dir,
+            check_for_update,
+            install_available_update,
             minimize_window,
             toggle_maximize_window,
             close_window,
@@ -2693,5 +2739,5 @@ fn main() {
             query_task_token,
         ])
         .run(tauri::generate_context!())
-        .expect("failed to run 知瑶画布");
+        .expect("failed to run 花海画布");
 }

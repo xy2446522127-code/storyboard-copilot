@@ -1,4 +1,4 @@
-# 知瑶画布 / Storyboard Copilot
+# 花海画布 / Huahai Canvas
 
 面向短剧、分镜和图像/视频生成工作流的本地桌面画布工具。
 

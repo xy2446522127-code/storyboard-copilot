@@ -1,7 +1,7 @@
 [package]
 name = "storyboard-copilot"
-version = "5.5.0-recovered.0"
-description = "Recovered open-source desktop storyboard canvas"
+version = "5.6.0"
+description = "花海画布：开源桌面分镜与创作画布"
 authors = ["xy2446522127-code"]
 edition = "2021"
 
@@ -19,3 +19,4 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
+tauri-plugin-updater = "2.10.1"
