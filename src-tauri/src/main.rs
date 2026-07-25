@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::Utc;
 use image::{imageops::FilterType, DynamicImage, GenericImageView, RgbaImage};
@@ -3721,6 +3723,11 @@ async fn install_available_update(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn app_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+#[tauri::command]
 fn minimize_window(window: WebviewWindow) -> Result<(), String> {
     window.minimize().map_err(|error| error.to_string())
 }
@@ -3873,6 +3880,7 @@ fn main() {
             validate_save_dir,
             check_for_update,
             install_available_update,
+            app_version,
             minimize_window,
             toggle_maximize_window,
             close_window,

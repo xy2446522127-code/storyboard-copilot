@@ -38,7 +38,7 @@ export function installSidebar({ openChat, openAnnouncements }) {
         <button type="button" data-nav="settings">⚙&nbsp;&nbsp;更多设置</button>
         <button type="button" data-nav="homepage">◉&nbsp;&nbsp;项目主页</button>
       </div>
-      <div class="huahai-sidebar__version">v5.7.0 · 本地优先</div>
+      <div class="huahai-sidebar__version" data-app-version>正在读取版本…</div>
     </aside>`;
   document.body.append(root);
 
@@ -49,6 +49,10 @@ export function installSidebar({ openChat, openAnnouncements }) {
   root.querySelector(".huahai-sidebar__bottom").prepend(announcementButton);
 
   const sidebar = root.querySelector("#huahai-sidebar");
+  const versionLabel = root.querySelector("[data-app-version]");
+  invoke("app_version")
+    .then((version) => { versionLabel.textContent = `v${version} · 本地优先`; })
+    .catch(() => { versionLabel.textContent = "花海画布 · 本地优先"; });
   const section = root.querySelector(".huahai-sidebar__section");
   let hideTimer;
   const open = () => {

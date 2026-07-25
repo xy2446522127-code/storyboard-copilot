@@ -14,9 +14,9 @@ if not exist "%~1" (
 pushd "%~dp0..\src-tauri"
 call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=x64
 rem Keep command-processor build paths ASCII-only.
-set "CARGO_TARGET_DIR=F:\HuahaiBuild\release-5.8.2"
-set "TEMP=F:\HuahaiBuild\tmp-release-5.8.2"
-set "TMP=F:\HuahaiBuild\tmp-release-5.8.2"
+set "CARGO_TARGET_DIR=F:\HuahaiBuild\release-5.8.4"
+set "TEMP=F:\HuahaiBuild\tmp-release-5.8.4"
+set "TMP=F:\HuahaiBuild\tmp-release-5.8.4"
 if not exist "%CARGO_TARGET_DIR%" mkdir "%CARGO_TARGET_DIR%"
 if not exist "%TEMP%" mkdir "%TEMP%"
 set "TAURI_SIGNING_PRIVATE_KEY=%~1"
