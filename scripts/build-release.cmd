@@ -15,9 +15,9 @@ pushd "%~dp0..\src-tauri"
 call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=x64
 rem Keep command-processor paths ASCII-only. The app itself still keeps all user
 rem data on F:\Huahaihuabu\花海画布; this avoids cmd.exe Unicode path corruption.
-set "CARGO_TARGET_DIR=F:\HuahaiBuild\release-5.8.0"
-set "TEMP=F:\HuahaiBuild\tmp-release-5.8.0"
-set "TMP=F:\HuahaiBuild\tmp-release-5.8.0"
+set "CARGO_TARGET_DIR=F:\HuahaiBuild\release-5.8.1"
+set "TEMP=F:\HuahaiBuild\tmp-release-5.8.1"
+set "TMP=F:\HuahaiBuild\tmp-release-5.8.1"
 if not exist "%CARGO_TARGET_DIR%" mkdir "%CARGO_TARGET_DIR%"
 if not exist "%TEMP%" mkdir "%TEMP%"
 set "TAURI_SIGNING_PRIVATE_KEY=%~1"
