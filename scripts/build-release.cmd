@@ -13,6 +13,11 @@ if not exist "%~1" (
 
 pushd "%~dp0..\src-tauri"
 call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=x64
+set "CARGO_TARGET_DIR=F:\Huahaihuabu\花海画布\build-cache\release-5.8.0"
+set "TEMP=F:\Huahaihuabu\花海画布\build-tmp\release-5.8.0"
+set "TMP=F:\Huahaihuabu\花海画布\build-tmp\release-5.8.0"
+if not exist "%CARGO_TARGET_DIR%" mkdir "%CARGO_TARGET_DIR%"
+if not exist "%TEMP%" mkdir "%TEMP%"
 set "TAURI_SIGNING_PRIVATE_KEY=%~1"
 if "%~2"=="" (
   if not exist "%~1.password" (

@@ -10,7 +10,7 @@
 
 ## 每次发布
 
-1. 将 `src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 与 `package.json` 的版本号同步为新的 SemVer 版本。
+1. 将 `src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 与 `package.json` 的版本号同步为新的 SemVer 版本；5.8.0 是密钥轮换过渡版，必须手动安装一次。
 2. 在 F 盘准备构建缓存和临时目录，并运行 `scripts/verify-and-commit.ps1`。它会执行 Rust/前端/命令覆盖检查与密钥扫描。
 3. 运行 `scripts/build-release.cmd <私钥文件路径>`。私钥和其 `.password` 文件只能保存在仓库外的安全位置。
 4. 使用 `scripts/make-updater-manifest.mjs` 为同一构建生成 `latest.json`，并将 NSIS 安装包、`.sig` 和 `latest.json` 上传到同一 GitHub Release。
