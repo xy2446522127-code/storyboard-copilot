@@ -5,6 +5,7 @@ const root = resolve(import.meta.dirname, "..");
 const assets = [
   "frontend/index.html",
   "frontend/huahai-canvas.png",
+  "frontend/module-loader.js",
   "frontend/modules/app-shell.js",
   "frontend/modules/shared/tauri.js",
   "frontend/assets/index-DTdX5WAD.js",
