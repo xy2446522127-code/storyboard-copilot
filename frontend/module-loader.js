@@ -30,6 +30,7 @@
       await Promise.all([
         "/modules/styles/tokens.css",
         "/modules/styles/shell.css",
+        "/modules/features/workspace/workspace.css",
         "/modules/features/sidebar/sidebar.css",
         "/modules/features/chat/chat.css",
         "/modules/features/canvas/batch-tools.css",

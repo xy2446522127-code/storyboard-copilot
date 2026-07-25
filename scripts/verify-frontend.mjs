@@ -8,6 +8,8 @@ const assets = [
   "frontend/module-loader.js",
   "frontend/legacy-network-guard.js",
   "frontend/modules/app-shell.js",
+  "frontend/modules/features/workspace/workspace.js",
+  "frontend/modules/features/workspace/workspace.css",
   "frontend/modules/features/announcements/announcements.js",
   "frontend/modules/features/announcements/announcements.css",
   "frontend/modules/features/performance/media-performance.js",
