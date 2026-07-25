@@ -17,7 +17,7 @@ function isCanvasActive() {
   return Boolean(document.querySelector(".react-flow, .xyflow"));
 }
 
-export function installSidebar({ openChat }) {
+export function installSidebar({ openChat, openAnnouncements }) {
   const root = document.createElement("div");
   root.id = "huahai-module-root";
   root.innerHTML = `
@@ -41,6 +41,12 @@ export function installSidebar({ openChat }) {
       <div class="huahai-sidebar__version">v5.7.0 · 本地优先</div>
     </aside>`;
   document.body.append(root);
+
+  const announcementButton = document.createElement("button");
+  announcementButton.type = "button";
+  announcementButton.dataset.nav = "announcements";
+  announcementButton.textContent = "公告";
+  root.querySelector(".huahai-sidebar__bottom").prepend(announcementButton);
 
   const sidebar = root.querySelector("#huahai-sidebar");
   const section = root.querySelector(".huahai-sidebar__section");
@@ -72,6 +78,7 @@ export function installSidebar({ openChat }) {
     if (!button) return;
     const action = button.dataset.nav;
     if (action === "chat") return openChat();
+    if (action === "announcements") return openAnnouncements();
     if (action === "homepage") {
       window.open(projectHomepage, "_blank", "noopener,noreferrer");
       return;
@@ -114,5 +121,9 @@ export function installSidebar({ openChat }) {
 
   // Ensure the local database is reachable early without reading any API setting.
   invoke("list_project_summaries").catch(() => {});
+  window.addEventListener("huahai:media-load", (event) => {
+    const count = Number(event.detail?.count || 0);
+    toast(`当前画布已有 ${count} 个媒体项：已启用懒加载与离屏视频暂停。建议按项目拆分超大画布。`, "info");
+  });
   return { open, close };
 }

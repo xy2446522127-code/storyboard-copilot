@@ -33,6 +33,8 @@
         "/modules/features/sidebar/sidebar.css",
         "/modules/features/chat/chat.css",
         "/modules/features/canvas/batch-tools.css",
+        "/modules/features/announcements/announcements.css",
+        "/modules/features/performance/media-performance.css",
         "/modules/features/update/update.css",
       ].map(stylesheet));
       await import("/modules/app-shell.js");

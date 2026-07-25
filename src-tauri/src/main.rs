@@ -204,8 +204,19 @@ fn provider_endpoint(base_url: &str, path: &str) -> Result<Url, String> {
     Url::parse(&format!("{normalized}/{path}")).map_err(|error| error.to_string())
 }
 
-fn service_endpoint(path: &str) -> Result<Url, String> {
-    Url::parse(&format!("https://zhiyaoai.cc{path}"))
+fn service_endpoint(app: &AppHandle, path: &str) -> Result<Url, String> {
+    let settings: Settings = read_json(settings_path(app)?)?;
+    let base_url = settings
+        .service_base_url
+        .or_else(|| settings.base_urls.get("huahai_service").cloned())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or("The Huahai service address is not configured. Configure it in API settings before using accounts or credits.".to_string())?;
+    let base = Url::parse(base_url.trim()).map_err(|error| format!("invalid service endpoint: {error}"))?;
+    if !matches!(base.scheme(), "http" | "https") {
+        return Err("service base URL must use HTTP or HTTPS".to_string());
+    }
+    let normalized = base.to_string().trim_end_matches('/').to_string();
+    Url::parse(&format!("{normalized}{path}"))
         .map_err(|error| format!("invalid service endpoint: {error}"))
 }
 
@@ -303,7 +314,6 @@ fn provider_credentials(app: &AppHandle, provider_id: &str) -> Result<(String, S
                     .map(ToOwned::to_owned)
             })
         })
-        .or_else(|| (provider_id == "grsai").then(|| "https://zhiyaoai.cc".to_string()))
         .ok_or("请先在设置中填写 Base URL")?;
     Ok((base_url, api_key))
 }
@@ -342,6 +352,8 @@ struct Settings {
     base_urls: HashMap<String, String>,
     #[serde(default)]
     custom_providers: Vec<serde_json::Value>,
+    #[serde(default)]
+    service_base_url: Option<String>,
 }
 
 fn app_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -2892,7 +2904,7 @@ async fn auth_login(
         .map_err(|error| error.to_string())?;
     let value = service_json_request(
         client
-            .post(service_endpoint("/api/auth/login")?)
+            .post(service_endpoint(&app, "/api/auth/login")?)
             .json(&serde_json::json!({"email": email.trim(), "password": password})),
         "登录",
     )
@@ -2920,7 +2932,7 @@ async fn auth_register(
         .map_err(|error| error.to_string())?;
     let value = service_json_request(
         client
-            .post(service_endpoint("/api/auth/register")?)
+            .post(service_endpoint(&app, "/api/auth/register")?)
             .json(&serde_json::json!({"email": email.trim(), "password": password})),
         "注册",
     )
@@ -2943,7 +2955,7 @@ async fn auth_logout(app: AppHandle) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
         let _ = service_json_request(
             client
-                .post(service_endpoint("/api/auth/logout")?)
+                .post(service_endpoint(&app, "/api/auth/logout")?)
                 .bearer_auth(&session.token),
             "退出登录",
         )
@@ -2985,13 +2997,13 @@ fn credits_machine_id(app: AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn credits_balance(machine_id: String, token: String) -> Result<serde_json::Value, String> {
+async fn credits_balance(app: AppHandle, machine_id: String, token: String) -> Result<serde_json::Value, String> {
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()
         .map_err(|error| error.to_string())?;
     let request = client
-        .get(service_endpoint("/api/credits/balance")?)
+        .get(service_endpoint(&app, "/api/credits/balance")?)
         .query(&[("user_id", machine_id)]);
     let request = if token.trim().is_empty() {
         request
@@ -3003,6 +3015,7 @@ async fn credits_balance(machine_id: String, token: String) -> Result<serde_json
 
 #[tauri::command]
 async fn credits_deduct(
+    app: AppHandle,
     machine_id: String,
     provider: String,
     model: String,
@@ -3016,7 +3029,7 @@ async fn credits_deduct(
         .build()
         .map_err(|error| error.to_string())?;
     let request = client
-        .post(service_endpoint("/api/credits/deduct")?)
+        .post(service_endpoint(&app, "/api/credits/deduct")?)
         .json(&serde_json::json!({
             "machine_id": machine_id,
             "provider": provider,
@@ -3035,6 +3048,7 @@ async fn credits_deduct(
 
 #[tauri::command]
 async fn credits_refund(
+    app: AppHandle,
     machine_id: String,
     job_id: String,
     provider: String,
@@ -3046,7 +3060,7 @@ async fn credits_refund(
         .build()
         .map_err(|error| error.to_string())?;
     let request = client
-        .post(service_endpoint("/api/credits/refund")?)
+        .post(service_endpoint(&app, "/api/credits/refund")?)
         .query(&[("user_id", machine_id)])
         .json(&serde_json::json!({
             "job_id": job_id,

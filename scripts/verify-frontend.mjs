@@ -7,18 +7,27 @@ const assets = [
   "frontend/huahai-canvas.png",
   "frontend/module-loader.js",
   "frontend/modules/app-shell.js",
+  "frontend/modules/features/announcements/announcements.js",
+  "frontend/modules/features/announcements/announcements.css",
+  "frontend/modules/features/performance/media-performance.js",
+  "frontend/modules/features/performance/media-performance.css",
   "frontend/modules/shared/tauri.js",
   "frontend/assets/index-DTdX5WAD.js",
   "frontend/assets/index-Du98eh5K.css",
   "frontend/assets/window-CIyEo8f3.js",
   "frontend/assets/event-C2tqEC6O.js",
-  "frontend/zy-logo.jpg",
   "frontend/qr-contact.jpg",
+  "announcements.json",
 ];
 
 for (const file of assets) {
   const content = readFileSync(resolve(root, file));
   if (content.length === 0) throw new Error(`${file} is empty`);
+}
+
+const announcementFeed = JSON.parse(readFileSync(resolve(root, "announcements.json"), "utf8"));
+if (announcementFeed.schemaVersion !== 1 || !Array.isArray(announcementFeed.announcements)) {
+  throw new Error("announcements.json must use schemaVersion 1 and an announcements array.");
 }
 
 function walkScripts(directory) {

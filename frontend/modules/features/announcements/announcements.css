@@ -1,0 +1,10 @@
+.huahai-announcement-drawer { position: fixed; inset: 0; z-index: var(--hh-z-modal, 2147483500); display: none; align-items: center; justify-content: center; padding: 20px; background: rgba(0, 0, 0, .58); }
+.huahai-announcement-drawer.is-open { display: flex; }
+.huahai-announcement-drawer__panel { width: min(620px, 100%); max-height: min(680px, 90vh); overflow: auto; border: 1px solid var(--hh-border); border-radius: 16px; color: var(--hh-text); background: #151b25; box-shadow: 0 24px 64px rgba(0,0,0,.48); }
+.huahai-announcement-drawer__panel header { position: sticky; top: 0; display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; background: #151b25; border-bottom: 1px solid var(--hh-border); }
+.huahai-announcement-drawer h2 { margin: 0; font-size: 18px; }
+.huahai-announcement-drawer button { width: 32px; height: 32px; border: 0; border-radius: 8px; color: var(--hh-text); background: transparent; font-size: 24px; cursor: pointer; }
+.huahai-announcement-list { display: grid; gap: 12px; padding: 16px 20px 20px; }
+.huahai-announcement { padding: 14px; border: 1px solid var(--hh-border); border-left: 3px solid #6c8aea; border-radius: 10px; background: rgba(255,255,255,.025); }
+.huahai-announcement--success { border-left-color: #34c58c; }.huahai-announcement--warning { border-left-color: #ecb44d; }.huahai-announcement--error { border-left-color: #e66a6a; }
+.huahai-announcement h3 { margin: 0 0 8px; font-size: 15px; }.huahai-announcement p { margin: 0; color: var(--hh-muted); line-height: 1.55; white-space: pre-wrap; }.huahai-announcement a { display: inline-block; margin-top: 10px; color: #9bb3ff; }.huahai-announcement-status { color: var(--hh-muted); }
