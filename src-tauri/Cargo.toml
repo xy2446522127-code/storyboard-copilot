@@ -1,6 +1,6 @@
 [package]
 name = "storyboard-copilot"
-version = "5.8.0"
+version = "5.8.1"
 description = "花海画布：开源桌面分镜与创作画布"
 authors = ["xy2446522127-code"]
 edition = "2021"
