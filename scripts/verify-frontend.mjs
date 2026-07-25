@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 const root = resolve(import.meta.dirname, "..");
 const assets = [
   "frontend/index.html",
+  "frontend/branding.js",
   "frontend/update.js",
   "frontend/assets/index-DTdX5WAD.js",
   "frontend/assets/index-Du98eh5K.css",
@@ -18,7 +19,7 @@ for (const file of assets) {
   if (content.length === 0) throw new Error(`${file} is empty`);
 }
 
-for (const script of ["frontend/assets/index-DTdX5WAD.js", "frontend/update.js"]) {
+for (const script of ["frontend/assets/index-DTdX5WAD.js", "frontend/branding.js", "frontend/update.js"]) {
   const content = readFileSync(resolve(root, script), "utf8");
   if (/sk-[a-f0-9]{32}/i.test(content)) {
     throw new Error(`${script} still contains an embedded API key.`);
