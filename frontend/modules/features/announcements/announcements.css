@@ -8,3 +8,8 @@
 .huahai-announcement { padding: 14px; border: 1px solid var(--hh-border); border-left: 3px solid #6c8aea; border-radius: 10px; background: rgba(255,255,255,.025); }
 .huahai-announcement--success { border-left-color: #34c58c; }.huahai-announcement--warning { border-left-color: #ecb44d; }.huahai-announcement--error { border-left-color: #e66a6a; }
 .huahai-announcement h3 { margin: 0 0 8px; font-size: 15px; }.huahai-announcement p { margin: 0; color: var(--hh-muted); line-height: 1.55; white-space: pre-wrap; }.huahai-announcement a { display: inline-block; margin-top: 10px; color: #9bb3ff; }.huahai-announcement-status { color: var(--hh-muted); }
+
+/* The recovered pre-open-source bundle carried static notices. Only the signed-in-repo
+   花海公告 feed is allowed to appear in the new application. */
+#announcement-bell-btn,
+#announcement-bell-panel { display: none !important; }

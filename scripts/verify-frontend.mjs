@@ -6,6 +6,7 @@ const assets = [
   "frontend/index.html",
   "frontend/huahai-canvas.png",
   "frontend/module-loader.js",
+  "frontend/legacy-network-guard.js",
   "frontend/modules/app-shell.js",
   "frontend/modules/features/announcements/announcements.js",
   "frontend/modules/features/announcements/announcements.css",
