@@ -147,7 +147,7 @@ fn image_result_from_response(value: &serde_json::Value) -> Option<String> {
         .and_then(serde_json::Value::as_array)
         .and_then(|items| items.first())
         .unwrap_or(value);
-    for key in ["url", "result", "output"] {
+    for key in ["url", "result", "output", "result_url", "video_url"] {
         if let Some(result) = item.get(key).and_then(serde_json::Value::as_str) {
             return Some(result.to_string());
         }
@@ -2459,22 +2459,80 @@ async fn submit_generate_video_job(
 }
 
 #[tauri::command]
-fn get_generate_video_job(
+async fn get_generate_video_job(
     app: AppHandle,
     job_id: String,
-    lock: State<StoreLock>,
+    lock: State<'_, StoreLock>,
 ) -> Result<GenerationJob, String> {
+    let mut job = {
+        let _guard = lock
+            .0
+            .lock()
+            .map_err(|_| "generation job lock poisoned".to_string())?;
+        get_generation_job(&open_projects(&app)?, &job_id)?.ok_or("generation job not found")?
+    };
+    if job.kind != "video" {
+        return Err("generation job is not a video job".to_string());
+    }
+    if job.status != "pending" || job.remote_job_id.is_none() {
+        return Ok(job);
+    }
+    let (base_url, api_key) = provider_credentials(&app, &job.provider_id)?;
+    let endpoint = provider_endpoint(
+        &base_url,
+        &format!(
+            "video/generations/{}",
+            job.remote_job_id.as_deref().unwrap_or_default()
+        ),
+    )?;
+    let response = Client::builder()
+        .timeout(std::time::Duration::from_secs(45))
+        .build()
+        .map_err(|error| error.to_string())?
+        .get(endpoint)
+        .bearer_auth(api_key)
+        .send()
+        .await;
+    match response {
+        Ok(response) if response.status().is_success() => {
+            let value: serde_json::Value = response
+                .json()
+                .await
+                .map_err(|error| format!("视频任务响应不是 JSON: {error}"))?;
+            job.result = image_result_from_response(&value).or(job.result);
+            job.status = if job.result.is_some() {
+                "succeeded".to_string()
+            } else {
+                response_status(&value, "pending")
+            };
+            job.progress = value
+                .pointer("/data/progress")
+                .or_else(|| value.get("progress"))
+                .and_then(serde_json::Value::as_u64)
+                .map(|value| value.min(100) as u8)
+                .unwrap_or(if job.status == "succeeded" { 100 } else { 0 });
+            job.error = value
+                .pointer("/data/fail_reason")
+                .or_else(|| value.get("error"))
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned);
+        }
+        Ok(response) => {
+            job.status = "failed".to_string();
+            job.error = Some(format!("查询视频任务失败 ({})", response.status()));
+        }
+        Err(error) => {
+            job.status = "failed".to_string();
+            job.error = Some(format!("查询视频任务失败: {error}"));
+        }
+    }
+    job.updated_at = Utc::now().to_rfc3339();
     let _guard = lock
         .0
         .lock()
         .map_err(|_| "generation job lock poisoned".to_string())?;
-    let job =
-        get_generation_job(&open_projects(&app)?, &job_id)?.ok_or("generation job not found")?;
-    if job.kind == "video" {
-        Ok(job)
-    } else {
-        Err("generation job is not a video job".to_string())
-    }
+    save_generation_job(&open_projects(&app)?, &job)?;
+    Ok(job)
 }
 
 #[tauri::command]
