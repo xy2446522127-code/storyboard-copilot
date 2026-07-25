@@ -25,6 +25,7 @@
       },
       "nsis": {
         "installMode": "currentUser",
+        "installerHooks": "./windows/hooks.nsh",
         "languages": ["SimpChinese", "English"],
         "installerIcon": "icons/huahai-canvas.ico",
         "uninstallerIcon": "icons/huahai-canvas.ico"
