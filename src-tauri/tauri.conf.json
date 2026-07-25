@@ -1,22 +1,13 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "花海画布",
-  "version": "5.7.1",
+  "version": "5.7.3",
   "identifier": "cc.zhiyao.storyboard-copilot",
   "build": {
     "frontendDist": "../frontend"
   },
   "app": {
-    "windows": [
-      {
-        "title": "花海画布",
-        "width": 1280,
-        "height": 800,
-        "minWidth": 960,
-        "minHeight": 640,
-        "resizable": true
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
     }

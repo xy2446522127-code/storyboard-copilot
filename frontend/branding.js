@@ -32,11 +32,21 @@
 
   const start = () => {
     translate();
+    for (const image of document.querySelectorAll('img[src="/zy-logo.jpg"], img[src$="/zy-logo.jpg"]')) {
+      image.src = '/huahai-canvas.png';
+      image.alt = newName;
+    }
     new MutationObserver((records) => {
       for (const record of records) {
         if (record.type === 'characterData') translate(record.target.parentNode || document);
         for (const node of record.addedNodes) {
-          if (node.nodeType === Node.ELEMENT_NODE || node.nodeType === Node.TEXT_NODE) translate(node);
+          if (node.nodeType === Node.ELEMENT_NODE || node.nodeType === Node.TEXT_NODE) {
+            translate(node);
+            if (node.nodeType === Node.ELEMENT_NODE && node.matches?.('img[src="/zy-logo.jpg"], img[src$="/zy-logo.jpg"]')) {
+              node.src = '/huahai-canvas.png';
+              node.alt = newName;
+            }
+          }
         }
       }
     }).observe(document.documentElement, { childList: true, subtree: true, characterData: true });

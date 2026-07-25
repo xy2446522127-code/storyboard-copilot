@@ -12,7 +12,7 @@ use std::{
     process::{Command, Stdio},
     sync::Mutex,
 };
-use tauri::{AppHandle, Manager, State, WebviewWindow};
+use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tauri_plugin_updater::UpdaterExt;
 use uuid::Uuid;
 
@@ -345,10 +345,10 @@ struct Settings {
 }
 
 fn app_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let path = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| error.to_string())?;
+    let _ = app;
+    // User data and the WebView cache are intentionally kept on F:.  The application is
+    // designed as a local creative workspace and must not leave project data behind on C:.
+    let path = PathBuf::from(r"F:\Huahaihuabu\花海画布\data");
     fs::create_dir_all(&path).map_err(|error| error.to_string())?;
     Ok(path)
 }
@@ -3655,6 +3655,18 @@ fn main() {
     tauri::Builder::default()
         .manage(StoreLock::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .setup(|app| {
+            let webview_data = PathBuf::from(r"F:\Huahaihuabu\花海画布\webview");
+            fs::create_dir_all(&webview_data)?;
+            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                .title("花海画布")
+                .inner_size(1280.0, 800.0)
+                .min_inner_size(960.0, 640.0)
+                .resizable(true)
+                .data_directory(webview_data)
+                .build()?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             list_assets,
             add_asset,
