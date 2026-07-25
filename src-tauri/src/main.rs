@@ -34,6 +34,45 @@ struct ProjectRecord {
     updated_at: String,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_preview_rejects_commands_outside_the_whitelist() {
+        assert!(
+            validate_agent_actions(r#"[{"type":"deleteNodes","params":{"ids":["a"]}}]"#).is_ok()
+        );
+        assert!(
+            validate_agent_actions(r#"[{"type":"runShell","params":{"command":"whoami"}}]"#)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn canvas_node_classifier_uses_type_and_data() {
+        let image =
+            serde_json::json!({"id":"image-1","type":"image","data":{"imageUrl":"file.png"}});
+        let video =
+            serde_json::json!({"id":"video-1","type":"video","data":{"videoMode":"image2video"}});
+        assert!(node_is_kind(&image, "image"));
+        assert!(node_is_kind(&video, "video"));
+        assert!(!node_is_kind(&image, "video"));
+    }
+
+    #[test]
+    fn raw_media_is_not_allowed_in_default_chat_context() {
+        assert!(sanitize_chat_context(Some(
+            r#"{"selectedNodes":[{"id":"1","text":"hello"}]}"#.to_string()
+        ))
+        .is_ok());
+        assert!(sanitize_chat_context(Some(
+            r#"{"image":"data:image/png;base64,AAAA"}"#.to_string()
+        ))
+        .is_err());
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AssetRecord {
@@ -1977,7 +2016,7 @@ fn record_canvas_batch_history(
 ) -> Result<(), String> {
     connection
         .execute(
-            "UPDATE canvas_batch_history SET undone = 0 WHERE project_id = ?1 AND undone = 1",
+            "DELETE FROM canvas_batch_history WHERE project_id = ?1 AND undone = 1",
             [project_id],
         )
         .map_err(|error| error.to_string())?;
@@ -2591,7 +2630,7 @@ fn redo_last_canvas_batch_action(
     let connection = open_projects(&app)?;
     let (history_id, nodes_json, edges_json): (String, String, String) = connection
         .query_row(
-            "SELECT id, after_nodes_json, after_edges_json FROM canvas_batch_history WHERE project_id = ?1 AND undone = 1 ORDER BY created_at ASC LIMIT 1",
+            "SELECT id, after_nodes_json, after_edges_json FROM canvas_batch_history WHERE project_id = ?1 AND undone = 1 ORDER BY created_at DESC LIMIT 1",
             [&project_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )

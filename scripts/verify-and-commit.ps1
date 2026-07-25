@@ -6,6 +6,17 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repo = Resolve-Path (Join-Path $PSScriptRoot '..')
+$fallbackBuildRoot = 'F:\Z huabu\知瑶画布\build-cache\verified-commits'
+if (-not $env:CARGO_TARGET_DIR -and (Test-Path 'F:\')) {
+    New-Item -ItemType Directory -Force -Path $fallbackBuildRoot | Out-Null
+    $env:CARGO_TARGET_DIR = $fallbackBuildRoot
+}
+if (-not $env:TEMP -or -not (Test-Path $env:TEMP) -or ((Get-PSDrive -Name C).Free -eq 0)) {
+    $fallbackTemp = 'F:\Z huabu\知瑶画布\build-tmp\verified-commits'
+    New-Item -ItemType Directory -Force -Path $fallbackTemp | Out-Null
+    $env:TEMP = $fallbackTemp
+    $env:TMP = $fallbackTemp
+}
 Push-Location $repo
 try {
     & (Join-Path $PSScriptRoot 'cargo-check.cmd')

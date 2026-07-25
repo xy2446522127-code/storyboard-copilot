@@ -53,7 +53,7 @@ export function installChatPanel() {
     messages.replaceChildren();
     if (!session) return;
     const history = await invoke("list_chat_messages", { sessionId: session.id });
-    history.forEach(addMessage);
+    history.forEach((message) => addMessage(message));
   };
   const ensureSession = async () => {
     if (session) return session;
