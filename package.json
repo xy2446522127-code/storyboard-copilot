@@ -1,0 +1,9 @@
+{
+  "name": "storyboard-copilot",
+  "version": "5.5.0-recovered.0",
+  "private": false,
+  "type": "module",
+  "scripts": {
+    "verify:frontend": "node scripts/verify-frontend.mjs && node scripts/audit-static-assets.mjs"
+  }
+}
