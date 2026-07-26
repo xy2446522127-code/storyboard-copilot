@@ -9,6 +9,8 @@ export function installCanvasBatchTools() {
     <button type="button" data-batch-action="connect-video">连接到生视频</button>
     <button type="button" data-batch-action="arrange-horizontal">横向排列</button>
     <button type="button" data-batch-action="arrange-vertical">纵向排列</button>
+    <button type="button" data-batch-action="group">分组</button>
+    <button type="button" data-batch-action="ungroup">解组</button>
     <button type="button" data-batch-action="undo">撤销</button>
     <button type="button" data-batch-action="redo">重做</button>
     <button type="button" data-batch-action="cancel">取消选择</button>`;
@@ -19,8 +21,14 @@ export function installCanvasBatchTools() {
   const refresh = () => {
     selected = selectedFlowNodeIds();
     const images = [...document.querySelectorAll(".react-flow__node.selected img, .xyflow__node.selected img")];
-    const visible = selected.length >= 2 && images.length >= 2;
+    const selectedNodes = [...document.querySelectorAll(".react-flow__node.selected, .xyflow__node.selected")];
+    const hasGroup = selectedNodes.some((node) => (node.innerText || "").includes("分组"));
+    const visible = (selected.length >= 2 && images.length >= 2) || hasGroup;
     toolbar.classList.toggle("is-visible", visible);
+    toolbar.querySelectorAll('[data-batch-action="connect-video"], [data-batch-action="arrange-horizontal"], [data-batch-action="arrange-vertical"]')
+      .forEach((button) => { button.disabled = images.length < 2; });
+    toolbar.querySelector('[data-batch-action="group"]').disabled = selected.length < 2;
+    toolbar.querySelector('[data-batch-action="ungroup"]').disabled = !hasGroup;
   };
   const delayedRefresh = () => {
     window.clearTimeout(refreshTimer);
@@ -66,7 +74,8 @@ export function installCanvasBatchTools() {
     try {
       const projectId = await invoke("find_project_for_canvas_selection", { nodeIds });
       if (!projectId) throw new Error("未能识别当前项目；请先保存并重新打开画布。");
-      const preview = await invoke("preview_canvas_batch_action", { projectId, selectedNodeIds: nodeIds });
+      const needsImages = ["connect-video", "arrange-horizontal", "arrange-vertical"].includes(action);
+      const preview = needsImages ? await invoke("preview_canvas_batch_action", { projectId, selectedNodeIds: nodeIds }) : null;
       let targetVideoNodeId = null;
       if (action === "connect-video") {
         if (preview.videoTargets.length > 1) {
@@ -83,7 +92,14 @@ export function installCanvasBatchTools() {
         action,
         targetVideoNodeId,
       });
-      toast(action === "connect-video" ? "批量连线已保存；视频生成前会要求确认多参考图能力。" : "批量排列已保存；可从画布历史撤销。", "success");
+      const messages = {
+        "connect-video": "批量连线已保存；视频生成前会要求确认多参考图能力。",
+        "arrange-horizontal": "横向排列已保存；可从画布历史撤销。",
+        "arrange-vertical": "纵向排列已保存；可从画布历史撤销。",
+        group: "已创建分组；原节点和连线保持不变。",
+        ungroup: "已解组；成员节点和连线保持不变。",
+      };
+      toast(messages[action] || "批量操作已保存。", "success");
       // The recovered React application owns its canvas state.  A reload is the safe bridge
       // after a database-level batch action, avoiding a second, divergent in-memory graph.
       window.setTimeout(() => window.location.reload(), 650);

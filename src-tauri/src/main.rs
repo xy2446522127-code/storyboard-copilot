@@ -3341,9 +3341,6 @@ fn apply_canvas_batch_action(
         .filter(|node| node_is_kind(node, "image"))
         .filter_map(|node| node_id(node).map(ToOwned::to_owned))
         .collect::<Vec<_>>();
-    if image_ids.len() < 2 {
-        return Err("select at least two image nodes".to_string());
-    }
     image_ids.sort_by(|left, right| {
         let left_node = nodes
             .iter()
@@ -3370,6 +3367,9 @@ fn apply_canvas_batch_action(
 
     match action.as_str() {
         "arrange-horizontal" | "arrange-vertical" => {
+            if image_ids.len() < 2 {
+                return Err("select at least two image nodes".to_string());
+            }
             let selected_images = nodes
                 .iter()
                 .filter(|node| {
@@ -3412,6 +3412,9 @@ fn apply_canvas_batch_action(
             }
         }
         "connect-video" => {
+            if image_ids.len() < 2 {
+                return Err("select at least two image nodes".to_string());
+            }
             let selected_videos = selected
                 .iter()
                 .filter(|node| node_is_kind(node, "video"))
@@ -3493,6 +3496,79 @@ fn apply_canvas_batch_action(
                     serde_json::json!(true),
                 );
             }
+        }
+        "group" => {
+            let member_ids = selected
+                .iter()
+                .filter_map(|node| node_id(node).map(ToOwned::to_owned))
+                .filter(|id| {
+                    nodes
+                        .iter()
+                        .find(|node| node_id(node) == Some(id.as_str()))
+                        .is_some_and(|node| {
+                            node.get("type").and_then(serde_json::Value::as_str)
+                                != Some("groupNode")
+                        })
+                })
+                .collect::<Vec<_>>();
+            if member_ids.len() < 2 {
+                return Err("select at least two non-group nodes".to_string());
+            }
+            let members = nodes
+                .iter()
+                .filter(|node| {
+                    member_ids
+                        .iter()
+                        .any(|id| node_id(node) == Some(id.as_str()))
+                })
+                .collect::<Vec<_>>();
+            let left = members
+                .iter()
+                .map(|node| node_position(node).0)
+                .fold(f64::INFINITY, f64::min);
+            let top = members
+                .iter()
+                .map(|node| node_position(node).1)
+                .fold(f64::INFINITY, f64::min);
+            let right = members
+                .iter()
+                .map(|node| {
+                    let position = node_position(node);
+                    position.0 + node_size(node).0
+                })
+                .fold(f64::NEG_INFINITY, f64::max);
+            let bottom = members
+                .iter()
+                .map(|node| {
+                    let position = node_position(node);
+                    position.1 + node_size(node).1
+                })
+                .fold(f64::NEG_INFINITY, f64::max);
+            nodes.push(serde_json::json!({
+                "id": format!("group-{}", Uuid::new_v4()),
+                "type": "groupNode",
+                "position": {"x": left - 24.0, "y": top - 56.0},
+                "width": (right - left + 48.0).max(300.0),
+                "height": (bottom - top + 80.0).max(200.0),
+                "data": {"displayName": "分组", "childNodeIds": member_ids}
+            }));
+        }
+        "ungroup" => {
+            let group_ids = selected
+                .iter()
+                .filter(|node| {
+                    node.get("type").and_then(serde_json::Value::as_str) == Some("groupNode")
+                })
+                .filter_map(|node| node_id(node).map(ToOwned::to_owned))
+                .collect::<Vec<_>>();
+            if group_ids.is_empty() {
+                return Err("select a group node to ungroup".to_string());
+            }
+            nodes.retain(|node| {
+                !group_ids
+                    .iter()
+                    .any(|id| node_id(node) == Some(id.as_str()))
+            });
         }
         _ => return Err("unsupported canvas batch action".to_string()),
     }
