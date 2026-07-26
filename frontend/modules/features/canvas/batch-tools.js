@@ -9,6 +9,8 @@ export function installCanvasBatchTools() {
     <button type="button" data-batch-action="connect-video">连接到生视频</button>
     <button type="button" data-batch-action="arrange-horizontal">横向排列</button>
     <button type="button" data-batch-action="arrange-vertical">纵向排列</button>
+    <button type="button" data-batch-action="undo">撤销</button>
+    <button type="button" data-batch-action="redo">重做</button>
     <button type="button" data-batch-action="cancel">取消选择</button>`;
   document.body.append(toolbar);
   let selected = [];
@@ -24,6 +26,13 @@ export function installCanvasBatchTools() {
     window.clearTimeout(refreshTimer);
     refreshTimer = window.setTimeout(refresh, 40);
   };
+  const saveLegacyCanvas = () => {
+    const button = [...document.querySelectorAll("button")]
+      .find((candidate) => (candidate.textContent || "").trim() === "保存画布");
+    if (!button || button.disabled) return false;
+    button.click();
+    return true;
+  };
   document.addEventListener("pointerup", delayedRefresh, true);
   document.addEventListener("keyup", delayedRefresh, true);
   new MutationObserver(delayedRefresh).observe(document.getElementById("root"), { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
@@ -32,10 +41,27 @@ export function installCanvasBatchTools() {
     const action = event.target.closest("[data-batch-action]")?.dataset.batchAction;
     if (!action) return;
     if (action === "cancel") {
-      document.querySelectorAll(".react-flow__node.selected, .xyflow__node.selected").forEach((node) => node.classList.remove("selected"));
+      const pane = document.querySelector(".react-flow__pane, .xyflow__pane");
+      pane?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
       refresh();
       return;
     }
+    if (action === "undo" || action === "redo") {
+      try {
+        const nodeIds = selectedFlowNodeIds();
+        const projectId = await invoke("find_project_for_canvas_selection", { nodeIds });
+        if (!projectId) throw new Error("请先打开并保存项目，再使用撤销或重做。");
+        await invoke(action === "undo" ? "undo_last_canvas_batch_action" : "redo_last_canvas_batch_action", { projectId });
+        toast(action === "undo" ? "已撤销上一次批量操作。" : "已重做批量操作。", "success");
+        window.setTimeout(() => window.location.reload(), 450);
+      } catch (error) { toast(`${action === "undo" ? "撤销" : "重做"}未执行：${String(error)}`, "error"); }
+      return;
+    }
+    if (!saveLegacyCanvas()) {
+      toast("请先使用旧画布顶部的“保存画布”保存项目，再进行批量操作。", "info");
+      return;
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 650));
     const nodeIds = selectedFlowNodeIds();
     try {
       const projectId = await invoke("find_project_for_canvas_selection", { nodeIds });

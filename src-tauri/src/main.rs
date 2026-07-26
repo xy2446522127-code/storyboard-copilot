@@ -3468,7 +3468,7 @@ fn apply_canvas_batch_action(
                         "id": format!("batch-edge-{}", Uuid::new_v4()),
                         "source": image_id,
                         "target": target_id,
-                        "type": "smoothstep"
+                        "type": "dataFlow"
                     }));
                 }
             }
