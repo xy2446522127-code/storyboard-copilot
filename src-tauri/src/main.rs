@@ -3958,7 +3958,7 @@ fn execute_agent_preview(
         .0
         .lock()
         .map_err(|_| "project store lock poisoned".to_string())?;
-    let connection = open_projects(&app)?;
+    let mut connection = open_projects(&app)?;
     let mut preview: AgentPreview = connection
         .query_row(
             "SELECT id, session_id, project_id, actions_json, status, created_at, confirmed_at FROM agent_previews WHERE id = ?1",
@@ -4152,9 +4152,10 @@ fn execute_agent_preview(
             _ => return Err(format!("agent action '{kind}' cannot be executed")),
         }
     }
-    let updated = write_project_canvas(&connection, &project, &nodes, &edges)?;
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let updated = write_project_canvas(&transaction, &project, &nodes, &edges)?;
     record_canvas_batch_history(
-        &connection,
+        &transaction,
         &project_id,
         "agent-preview",
         &before_nodes,
@@ -4163,12 +4164,13 @@ fn execute_agent_preview(
         &edges,
     )?;
     preview.status = "executed".to_string();
-    connection
+    transaction
         .execute(
             "UPDATE agent_previews SET status = ?1 WHERE id = ?2",
             params![preview.status, preview.id],
         )
         .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
     Ok(AgentExecution {
         preview,
         project: updated,
@@ -4334,7 +4336,7 @@ fn apply_canvas_batch_action(
         .0
         .lock()
         .map_err(|_| "project store lock poisoned".to_string())?;
-    let connection = open_projects(&app)?;
+    let mut connection = open_projects(&app)?;
     let project = get_project_record_from_db(&connection, &project_id)?
         .ok_or("project not found".to_string())?;
     let mut nodes = project_nodes(&project)?;
@@ -4435,8 +4437,9 @@ fn apply_canvas_batch_action(
                     return Err("chosen video node is not part of the selection".to_string())
                 }
                 (None, 0) => {
-                    let max_x = nodes
+                    let max_x = image_ids
                         .iter()
+                        .filter_map(|id| nodes.iter().find(|node| node_id(node) == Some(id.as_str())))
                         .map(|node| node_position(node).0 + node_size(node).0)
                         .fold(0.0, f64::max);
                     let top_y = image_ids
@@ -4581,9 +4584,10 @@ fn apply_canvas_batch_action(
         }
         _ => return Err("unsupported canvas batch action".to_string()),
     }
-    let updated = write_project_canvas(&connection, &project, &nodes, &edges)?;
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let updated = write_project_canvas(&transaction, &project, &nodes, &edges)?;
     record_canvas_batch_history(
-        &connection,
+        &transaction,
         &project_id,
         &action,
         &before_nodes,
@@ -4591,6 +4595,7 @@ fn apply_canvas_batch_action(
         &nodes,
         &edges,
     )?;
+    transaction.commit().map_err(|error| error.to_string())?;
     Ok(updated)
 }
 
@@ -4715,7 +4720,7 @@ fn append_image_source_to_canvas(
         .0
         .lock()
         .map_err(|_| "project store lock poisoned".to_string())?;
-    let connection = open_projects(&app)?;
+    let mut connection = open_projects(&app)?;
     let project = get_project_record_from_db(&connection, &project_id)?
         .ok_or("project not found".to_string())?;
     let mut nodes = project_nodes(&project)?;
@@ -4754,9 +4759,10 @@ fn append_image_source_to_canvas(
             "imageHeight": height
         }
     }));
-    let updated = write_project_canvas(&connection, &project, &nodes, &edges)?;
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let updated = write_project_canvas(&transaction, &project, &nodes, &edges)?;
     record_canvas_batch_history(
-        &connection,
+        &transaction,
         &project_id,
         "online-image-result",
         &before_nodes,
@@ -4764,6 +4770,7 @@ fn append_image_source_to_canvas(
         &nodes,
         &edges,
     )?;
+    transaction.commit().map_err(|error| error.to_string())?;
     Ok(updated)
 }
 
@@ -4777,7 +4784,7 @@ fn undo_last_canvas_batch_action(
         .0
         .lock()
         .map_err(|_| "project store lock poisoned".to_string())?;
-    let connection = open_projects(&app)?;
+    let mut connection = open_projects(&app)?;
     let (history_id, nodes_json, edges_json): (String, String, String) = connection
         .query_row(
             "SELECT id, before_nodes_json, before_edges_json FROM canvas_batch_history WHERE project_id = ?1 AND undone = 0 ORDER BY created_at DESC LIMIT 1",
@@ -4791,13 +4798,15 @@ fn undo_last_canvas_batch_action(
         serde_json::from_str(&nodes_json).map_err(|error| error.to_string())?;
     let edges: Vec<serde_json::Value> =
         serde_json::from_str(&edges_json).map_err(|error| error.to_string())?;
-    let updated = write_project_canvas(&connection, &project, &nodes, &edges)?;
-    connection
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let updated = write_project_canvas(&transaction, &project, &nodes, &edges)?;
+    transaction
         .execute(
             "UPDATE canvas_batch_history SET undone = 1 WHERE id = ?1",
             [history_id],
         )
         .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
     Ok(updated)
 }
 
@@ -4811,7 +4820,7 @@ fn redo_last_canvas_batch_action(
         .0
         .lock()
         .map_err(|_| "project store lock poisoned".to_string())?;
-    let connection = open_projects(&app)?;
+    let mut connection = open_projects(&app)?;
     let (history_id, nodes_json, edges_json): (String, String, String) = connection
         .query_row(
             "SELECT id, after_nodes_json, after_edges_json FROM canvas_batch_history WHERE project_id = ?1 AND undone = 1 ORDER BY created_at DESC LIMIT 1",
@@ -4825,13 +4834,15 @@ fn redo_last_canvas_batch_action(
         serde_json::from_str(&nodes_json).map_err(|error| error.to_string())?;
     let edges: Vec<serde_json::Value> =
         serde_json::from_str(&edges_json).map_err(|error| error.to_string())?;
-    let updated = write_project_canvas(&connection, &project, &nodes, &edges)?;
-    connection
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let updated = write_project_canvas(&transaction, &project, &nodes, &edges)?;
+    transaction
         .execute(
             "UPDATE canvas_batch_history SET undone = 0 WHERE id = ?1",
             [history_id],
         )
         .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
     Ok(updated)
 }
 
