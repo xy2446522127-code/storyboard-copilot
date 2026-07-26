@@ -1,6 +1,6 @@
 {
   "name": "storyboard-copilot",
-  "version": "5.8.4",
+  "version": "5.8.5",
   "private": false,
   "type": "module",
   "scripts": {
