@@ -13,8 +13,27 @@ if ($build -notmatch '^[Ff]:\\') { throw 'Release output must be on the F: drive
 $temp = "F:\HuahaiBuild\tmp-release-$($config.version)"
 $cargoHome = 'F:\Huahaihuabu\build-cache\cargo-home'
 $npmCache = 'F:\Huahaihuabu\build-cache\npm'
+$sharedNsis = 'F:\HuahaiBuild\tauri-bundler-tools\NSIS'
 if (-not (Test-Path -LiteralPath 'F:\')) { throw 'Release builds require the F: drive.' }
 New-Item -ItemType Directory -Force -Path $build,$temp,$cargoHome,$npmCache | Out-Null
+# Tauri puts downloadable bundler tools under each target directory. Reusing a
+# verified F-drive NSIS cache prevents a clean release output from attempting a
+# new tool download (which can be blocked by workstation policy) or writing to
+# an uncontrolled default cache location.
+if (-not (Test-Path -LiteralPath $sharedNsis)) {
+    $cached = Get-ChildItem -LiteralPath 'F:\HuahaiBuild' -Directory -Filter 'release-*' -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending |
+        ForEach-Object { Join-Path $_.FullName '.tauri\NSIS' } |
+        Where-Object { Test-Path -LiteralPath $_ } |
+        Select-Object -First 1
+    if (-not $cached) { throw 'No verified F-drive NSIS cache is available for the release build.' }
+    New-Item -ItemType Directory -Force -Path (Split-Path $sharedNsis -Parent) | Out-Null
+    Copy-Item -LiteralPath $cached -Destination $sharedNsis -Recurse -Force
+}
+if (-not (Test-Path -LiteralPath (Join-Path $build '.tauri\NSIS'))) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $build '.tauri') | Out-Null
+    Copy-Item -LiteralPath $sharedNsis -Destination (Join-Path $build '.tauri\NSIS') -Recurse -Force
+}
 # Keep every cache, build artifact and diagnostic log off the system drive.  The
 # bundled program has its own F: runtime paths; these settings cover the tools
 # that create the signed installer.
