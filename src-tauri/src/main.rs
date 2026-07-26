@@ -254,6 +254,16 @@ mod tests {
     }
 
     #[test]
+    fn api_key_normalization_accepts_header_style_copy_without_changing_the_secret() {
+        assert_eq!(normalize_api_key("  Bearer demo-key  "), "demo-key");
+        assert_eq!(
+            normalize_api_key("\u{feff}\u{200b}demo-key\u{200d}"),
+            "demo-key"
+        );
+        assert_eq!(normalize_api_key("'demo-key'"), "demo-key");
+    }
+
+    #[test]
     fn connected_arrangement_respects_edges_and_keeps_sibling_order_stable() {
         let stable = vec![
             "image-b".to_string(),
@@ -446,6 +456,30 @@ fn models_endpoint(base_url: &str) -> Result<Url, String> {
     Url::parse(&format!("{normalized}/models")).map_err(|error| error.to_string())
 }
 
+/// Normalizes a key copied from an OpenAI-compatible provider without ever
+/// exposing it to the WebView, logs, or error strings. Some provider consoles
+/// show a complete `Bearer ...` header and rich-text copy can also include
+/// zero-width characters; passing either verbatim would produce `Bearer
+/// Bearer ...` and a misleading 401 response.
+fn normalize_api_key(value: &str) -> String {
+    let cleaned = value
+        .trim_matches(|character: char| {
+            character.is_whitespace()
+                || matches!(character, '\u{feff}' | '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}')
+        })
+        .replace(['\u{feff}', '\u{200b}', '\u{200c}', '\u{200d}', '\u{2060}'], "");
+    let without_bearer = cleaned
+        .get(..7)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("bearer "))
+        .map(|_| &cleaned[7..])
+        .unwrap_or(cleaned.as_str());
+    without_bearer
+        .trim()
+        .trim_matches(|character| matches!(character, '\"' | '\''))
+        .trim()
+        .to_string()
+}
+
 fn provider_endpoint(base_url: &str, path: &str) -> Result<Url, String> {
     let base = Url::parse(base_url.trim()).map_err(|error| format!("invalid base URL: {error}"))?;
     if !matches!(base.scheme(), "http" | "https") {
@@ -617,7 +651,8 @@ fn provider_credentials(app: &AppHandle, provider_id: &str) -> Result<(String, S
         .api_keys
         .get(provider_id)
         .cloned()
-        .filter(|key| !key.trim().is_empty())
+        .map(|key| normalize_api_key(&key))
+        .filter(|key| !key.is_empty())
         .ok_or("请先在设置中填写 API Key")?;
     let base_url = settings
         .base_urls
@@ -4287,8 +4322,12 @@ fn set_api_key(
         .0
         .lock()
         .map_err(|_| "settings store lock poisoned".to_string())?;
+    let normalized_key = normalize_api_key(&key);
+    if normalized_key.is_empty() {
+        return Err("请填写有效的 API Key".to_string());
+    }
     let mut settings: Settings = read_json(settings_path(&app)?)?;
-    settings.api_keys.insert(provider, key);
+    settings.api_keys.insert(provider, normalized_key);
     write_json(settings_path(&app)?, &settings)
 }
 
@@ -4683,13 +4722,14 @@ fn list_configured_models(
 
 #[tauri::command]
 async fn list_remote_models(base_url: String, api_key: String) -> Result<Vec<String>, String> {
-    if api_key.trim().is_empty() {
+    let api_key = normalize_api_key(&api_key);
+    if api_key.is_empty() {
         return Err("请先填写 API Key".to_string());
     }
     let endpoint = models_endpoint(&base_url)?;
     let response = Client::new()
         .get(endpoint)
-        .bearer_auth(api_key.trim())
+        .bearer_auth(api_key)
         .header("Accept", "application/json")
         .send()
         .await

@@ -129,6 +129,23 @@ export function installApiSettings() {
 
   const field = (name) => form.querySelector(`[data-field="${name}"]`);
   const capabilities = () => Object.fromEntries([...capabilityNode.querySelectorAll("input")].map((input) => [input.value, input.checked]));
+  const ensureProviderId = () => {
+    const existing = safeText(field("id").value).replace(/[^a-zA-Z0-9_-]/g, "-").replace(/^-+|-+$/g, "");
+    if (existing) {
+      field("id").value = existing;
+      return existing;
+    }
+    const generated = `api-${Date.now().toString(36)}`;
+    field("id").value = generated;
+    return generated;
+  };
+  const modelFetchError = (error) => {
+    const detail = String(error);
+    if (/\b401\b/.test(detail)) return "服务端拒绝了密钥（401）。请只粘贴 API Key 本身，不要包含 Bearer、引号或额外字符；若仍失败，请在服务商后台确认该密钥有效。";
+    if (/\b403\b/.test(detail)) return "服务端拒绝了模型列表权限（403）。请确认该密钥具备模型列表访问权限。";
+    if (/timeout|timed out|超时/i.test(detail)) return "拉取模型超时。请检查服务地址和网络后重试。";
+    return `获取模型失败：${detail}`;
+  };
   const renderCapabilities = () => {
     capabilityNode.replaceChildren(...(capabilityLabels[kind] || []).map(([id, label]) => {
       const row = document.createElement("label");
@@ -221,13 +238,24 @@ export function installApiSettings() {
       if (!key && savedProvider && baseUrl.replace(/\/$/, "") !== String(savedProvider.base_url || "").replace(/\/$/, "")) {
         return toast("服务地址已修改；请先保存，或填写本次 API Key 后再拉取模型。", "info");
       }
+      const button = event.target.closest('[data-action="fetch-models"]');
+      button.disabled = true;
+      button.setAttribute("aria-busy", "true");
+      const originalLabel = button.textContent;
+      button.textContent = "拉取中…";
       try {
         const models = key
           ? await invoke("list_remote_models", { baseUrl, apiKey: key })
           : await invoke("list_saved_provider_models", { providerId: selectedProviderId });
         field("models").value = models.join("\n");
+        if (!selectedProviderId && !safeText(field("id").value)) ensureProviderId();
         toast(`已获取 ${models.length} 个模型。`, "success");
-      } catch (error) { toast(`获取模型失败：${String(error)}`, "error"); }
+      } catch (error) { toast(modelFetchError(error), "error"); }
+      finally {
+        button.disabled = false;
+        button.removeAttribute("aria-busy");
+        button.textContent = originalLabel;
+      }
     }
     if (action === "test-connection") {
       const providerId = safeText(field("id").value);
@@ -250,7 +278,7 @@ export function installApiSettings() {
   });
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const id = safeText(field("id").value).replace(/[^a-zA-Z0-9_-]/g, "-");
+    const id = ensureProviderId();
     const name = safeText(field("name").value, id);
     const baseUrl = safeText(field("baseUrl").value).replace(/\/$/, "");
     const models = splitModels(field("models").value);
