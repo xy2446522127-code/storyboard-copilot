@@ -6,6 +6,8 @@ const MAX_FILE_BYTES = 30 * 1024 * 1024;
 // predictable transfer budget so the optional compatibility plug-in cannot
 // freeze the recovered canvas while serializing a huge message to Tauri.
 const MAX_BATCH_BYTES = 60 * 1024 * 1024;
+const LEGACY_SAVE_TIMEOUT_MS = 4_000;
+const LEGACY_SAVE_POLL_MS = 120;
 
 function canvasPane(target) {
   const pane = target.closest(".react-flow__pane, .xyflow__pane, .react-flow, .xyflow");
@@ -61,9 +63,20 @@ async function savedProjectAfterLegacySave() {
   const before = await invoke("list_project_summaries");
   const beforeUpdatedAt = new Map(before.map((project) => [project.id, project.updatedAt]));
   if (!clickLegacySave()) return null;
-  await new Promise((resolve) => window.setTimeout(resolve, 700));
-  const after = await invoke("list_project_summaries");
-  return after.find((project) => beforeUpdatedAt.get(project.id) !== project.updatedAt) || after[0] || null;
+  // The old React store does not give plugins a save-complete event.  Poll the
+  // F-drive project store for a bounded time instead of assuming 700 ms is
+  // enough.  Only a unique changed project is safe to import into: choosing
+  // the most recently listed project would put a user's images in the wrong
+  // storyboard when a slow save or a concurrent update occurs.
+  const deadline = Date.now() + LEGACY_SAVE_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => window.setTimeout(resolve, LEGACY_SAVE_POLL_MS));
+    const after = await invoke("list_project_summaries");
+    const changed = after.filter((project) => beforeUpdatedAt.get(project.id) !== project.updatedAt);
+    if (changed.length === 1) return changed[0];
+    if (changed.length > 1) return null;
+  }
+  return null;
 }
 
 export function installBlankCanvasImageDrop() {

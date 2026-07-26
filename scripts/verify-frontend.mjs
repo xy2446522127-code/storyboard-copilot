@@ -62,6 +62,9 @@ const blankCanvasDrop = readFileSync(resolve(root, "frontend/modules/features/ca
 if (blankCanvasDrop.includes("window.prompt") || !blankCanvasDrop.includes("savedProjectAfterLegacySave")) {
   throw new Error("Blank-canvas drops must target the just-saved legacy project without an ambiguous project picker.");
 }
+if (!blankCanvasDrop.includes("LEGACY_SAVE_TIMEOUT_MS") || blankCanvasDrop.includes("|| after[0] || null")) {
+  throw new Error("Blank-canvas drops must wait for one unambiguous legacy save and must not guess a project.");
+}
 
 const sidebar = readFileSync(resolve(root, "frontend/modules/features/sidebar/sidebar.js"), "utf8");
 if (!sidebar.includes('event.clientX <= 3') || !sidebar.includes('sidebar.addEventListener("pointerleave", close)')) {
