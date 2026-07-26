@@ -1,6 +1,6 @@
 [package]
 name = "storyboard-copilot"
-version = "5.9.16"
+version = "5.9.17"
 description = "花海画布：开源桌面分镜与创作画布"
 authors = ["xy2446522127-code"]
 edition = "2021"
@@ -23,5 +23,6 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tokio = { version = "1", features = ["macros", "sync"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
 zip = "4.6.1"
+pdf-extract = "0.7"
 tauri-plugin-updater = "2.10.1"
 tauri-plugin-dialog = "2"

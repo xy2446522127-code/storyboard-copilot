@@ -2519,6 +2519,13 @@ fn document_text_excerpt(path: &str, file_name: &str) -> Result<Option<String>, 
     let bytes = fs::read(path).map_err(|error| error.to_string())?;
     let text = match extension.as_str() {
         "txt" | "md" | "csv" | "json" => String::from_utf8_lossy(&bytes).to_string(),
+        "pdf" => match pdf_extract::extract_text_from_mem(&bytes) {
+            Ok(text) => text,
+            // A scanned, encrypted, or malformed PDF can still be kept as a
+            // local attachment.  Returning no excerpt keeps its original
+            // bytes off the model request instead of inventing a summary.
+            Err(_) => return Ok(None),
+        },
         "docx" => {
             let mut archive = ZipArchive::new(Cursor::new(bytes)).map_err(|_| "DOCX 文件无法读取".to_string())?;
             let mut document = archive.by_name("word/document.xml").map_err(|_| "DOCX 缺少正文内容".to_string())?;
@@ -2583,10 +2590,8 @@ fn prepare_chat_attachments(
             let _ = fs::remove_file(&path);
             return Err("attachment is not a readable image".to_string());
         }
-        let text_excerpt = if matches!(mime_type.as_str(), "text/plain" | "text/markdown" | "text/csv" | "application/json" | "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
+        let text_excerpt = if matches!(mime_type.as_str(), "text/plain" | "text/markdown" | "text/csv" | "application/json" | "application/vnd.openxmlformats-officedocument.wordprocessingml.document" | "application/pdf") {
             document_text_excerpt(&path, &attachment.file_name)?
-        } else if mime_type == "application/pdf" {
-            Some("[已附加 PDF 文件；当前模型将收到文件名和摘要请求。PDF 正文提取将在后续版本提供。]".to_string())
         } else { None };
         prepared.push(ChatAttachment {
             file_name: attachment.file_name,
