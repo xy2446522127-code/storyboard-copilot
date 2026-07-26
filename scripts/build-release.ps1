@@ -1,13 +1,15 @@
 param(
   [Parameter(Mandatory = $true)][string]$PrivateKey,
-  [string]$PasswordFile = "$PrivateKey.password"
+  [string]$PasswordFile = "$PrivateKey.password",
+  [string]$OutputDirectory
 )
 $ErrorActionPreference = 'Stop'
 if (-not (Test-Path -LiteralPath $PrivateKey)) { throw 'Updater private key was not found.' }
 if (-not (Test-Path -LiteralPath $PasswordFile)) { throw 'Updater password file was not found.' }
 $root = Resolve-Path (Join-Path $PSScriptRoot '..')
 $config = Get-Content (Join-Path $root 'src-tauri\tauri.conf.json') -Raw | ConvertFrom-Json
-$build = "F:\HuahaiBuild\release-$($config.version)"
+$build = if ($OutputDirectory) { $OutputDirectory } else { "F:\HuahaiBuild\release-$($config.version)" }
+if ($build -notmatch '^[Ff]:\\') { throw 'Release output must be on the F: drive.' }
 $temp = "F:\HuahaiBuild\tmp-release-$($config.version)"
 $cargoHome = 'F:\Huahaihuabu\build-cache\cargo-home'
 $npmCache = 'F:\Huahaihuabu\build-cache\npm'
