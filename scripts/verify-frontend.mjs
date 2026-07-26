@@ -8,8 +8,6 @@ const assets = [
   "frontend/module-loader.js",
   "frontend/legacy-network-guard.js",
   "frontend/modules/app-shell.js",
-  "frontend/modules/features/workspace/workspace.js",
-  "frontend/modules/features/workspace/workspace.css",
   "frontend/modules/features/announcements/announcements.js",
   "frontend/modules/features/announcements/announcements.css",
   "frontend/modules/features/performance/media-performance.js",
@@ -46,6 +44,12 @@ for (const script of scripts) {
   const content = readFileSync(script, "utf8");
   if (/sk-[a-f0-9]{32}/i.test(content)) {
     throw new Error(`${script} still contains an embedded API key.`);
+  }
+  // Optional modules are allowed to observe the recovered root, but never to
+  // hide or replace it.  This regression gate prevents the old whole-page
+  // workspace mistake from silently returning in a later feature branch.
+  if (/legacyRoot\s*\.hidden\s*=\s*true|#root\s*\{[^}]*display\s*:\s*none/is.test(content)) {
+    throw new Error(`${script} attempts to hide the recovered legacy root.`);
   }
 }
 
