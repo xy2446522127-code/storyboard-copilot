@@ -133,6 +133,12 @@ mod tests {
     }
 
     #[test]
+    fn chat_completion_content_supports_non_streaming_openai_shape() {
+        let response = serde_json::json!({"choices":[{"message":{"content":"hello"}}]});
+        assert_eq!(chat_completion_content(&response).as_deref(), Some("hello"));
+    }
+
+    #[test]
     fn system_prompt_key_guard_rejects_only_key_shaped_tokens() {
         assert!(!contains_api_key_like_token("Write a task-based outline."));
         let key_shaped_text = format!("never paste {}{} into chat", "sk-", "abcdefghijklmnopqrst");
@@ -2596,6 +2602,49 @@ fn chat_stream_delta(value: &serde_json::Value) -> Option<String> {
     })
 }
 
+fn chat_completion_content(value: &serde_json::Value) -> Option<String> {
+    let content = value
+        .pointer("/choices/0/message/content")
+        .or_else(|| value.pointer("/data/choices/0/message/content"))?;
+    if let Some(text) = content.as_str() {
+        return Some(text.to_string());
+    }
+    content.as_array().map(|parts| {
+        parts
+            .iter()
+            .filter_map(|part| {
+                part.get("text")
+                    .or_else(|| part.get("content"))
+                    .and_then(serde_json::Value::as_str)
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    })
+}
+
+fn persist_chat_assistant_message(
+    app: &AppHandle,
+    session_id: String,
+    content: String,
+) -> Result<(), String> {
+    let message = ChatMessage {
+        id: Uuid::new_v4().to_string(),
+        session_id,
+        role: "assistant".to_string(),
+        content,
+        context_json: "{}".to_string(),
+        attachments_json: "[]".to_string(),
+        status: "complete".to_string(),
+        created_at: Utc::now().to_rfc3339(),
+    };
+    let store_lock = app.state::<StoreLock>();
+    let _guard = store_lock
+        .0
+        .lock()
+        .map_err(|_| "project store lock poisoned".to_string())?;
+    insert_chat_message(&open_projects(app)?, &message)
+}
+
 fn chat_system_message(system_prompt: Option<String>) -> Result<String, String> {
     let requested = system_prompt.unwrap_or_default().trim().to_string();
     if requested.chars().count() > 4_000 {
@@ -3349,6 +3398,88 @@ fn start_chat_stream(
             );
             return;
         }
+        let is_sse = response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.to_ascii_lowercase().contains("text/event-stream"));
+        if !is_sse {
+            let value = tokio::select! {
+                _ = cancel.cancelled() => {
+                    finish_chat_stream(worker_app.state::<ChatStreamState>().inner(), &worker_request_id, "cancelled", None);
+                    return;
+                }
+                value = response.json::<serde_json::Value>() => value,
+            };
+            let value = match value {
+                Ok(value) => value,
+                Err(error) => {
+                    finish_chat_stream(
+                        worker_app.state::<ChatStreamState>().inner(),
+                        &worker_request_id,
+                        "failed",
+                        Some(format!("chat response is not valid JSON: {error}")),
+                    );
+                    return;
+                }
+            };
+            let content = match chat_completion_content(&value)
+                .filter(|content| !content.trim().is_empty())
+            {
+                Some(content) if content.len() <= MAX_CHAT_RESPONSE_CHARS => content,
+                Some(_) => {
+                    finish_chat_stream(
+                        worker_app.state::<ChatStreamState>().inner(),
+                        &worker_request_id,
+                        "failed",
+                        Some("chat response exceeded the 48000 character safety limit".to_string()),
+                    );
+                    return;
+                }
+                None => {
+                    finish_chat_stream(
+                        worker_app.state::<ChatStreamState>().inner(),
+                        &worker_request_id,
+                        "failed",
+                        Some("chat response did not contain message content".to_string()),
+                    );
+                    return;
+                }
+            };
+            if cancel.is_cancelled() {
+                finish_chat_stream(
+                    worker_app.state::<ChatStreamState>().inner(),
+                    &worker_request_id,
+                    "cancelled",
+                    None,
+                );
+                return;
+            }
+            if append_chat_stream_delta(
+                worker_app.state::<ChatStreamState>().inner(),
+                &worker_request_id,
+                content.clone(),
+            )
+            .is_err()
+            {
+                return;
+            }
+            match persist_chat_assistant_message(&worker_app, worker_session_id.clone(), content) {
+                Ok(()) => finish_chat_stream(
+                    worker_app.state::<ChatStreamState>().inner(),
+                    &worker_request_id,
+                    "completed",
+                    None,
+                ),
+                Err(error) => finish_chat_stream(
+                    worker_app.state::<ChatStreamState>().inner(),
+                    &worker_request_id,
+                    "failed",
+                    Some(error),
+                ),
+            }
+            return;
+        }
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
         let mut content = String::new();
@@ -3430,25 +3561,7 @@ fn start_chat_stream(
             );
             return;
         }
-        let assistant_message = ChatMessage {
-            id: Uuid::new_v4().to_string(),
-            session_id: worker_session_id,
-            role: "assistant".to_string(),
-            content,
-            context_json: "{}".to_string(),
-            attachments_json: "[]".to_string(),
-            status: "complete".to_string(),
-            created_at: Utc::now().to_rfc3339(),
-        };
-        let stored = worker_app
-            .state::<StoreLock>()
-            .0
-            .lock()
-            .map_err(|_| "project store lock poisoned".to_string())
-            .and_then(|_guard| {
-                insert_chat_message(&open_projects(&worker_app)?, &assistant_message)
-            });
-        match stored {
+        match persist_chat_assistant_message(&worker_app, worker_session_id, content) {
             Ok(()) => finish_chat_stream(
                 worker_app.state::<ChatStreamState>().inner(),
                 &worker_request_id,
