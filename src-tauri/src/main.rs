@@ -854,7 +854,8 @@ fn copy_text_to_windows_clipboard(text: &str) -> Result<(), String> {
 }
 
 fn ffmpeg_executable(name: &str) -> PathBuf {
-    let bundled = PathBuf::from(r"C:\ffmpeg\bin").join(format!("{name}.exe"));
+    let bundled =
+        PathBuf::from(r"F:\Huahaihuabu\花海画布\tools\ffmpeg\bin").join(format!("{name}.exe"));
     if bundled.is_file() {
         bundled
     } else {
