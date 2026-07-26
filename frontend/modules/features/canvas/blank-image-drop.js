@@ -55,6 +55,24 @@ function clickLegacySave() {
   return true;
 }
 
+function fileCategory(file) {
+  if (file.type.startsWith("video/")) return "videos";
+  if (file.type.startsWith("audio/")) return "audio";
+  if (/\.(txt|md|csv|json|pdf|docx)$/i.test(file.name)) return "documents";
+  return "";
+}
+
+function droppedFileReferences(files) {
+  const seen = new Set();
+  return files.filter((file) => {
+    const category = fileCategory(file);
+    const identity = `${file.name}::${file.size}::${file.lastModified}`;
+    if (!category || seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
+}
+
 async function savedProjectAfterLegacySave() {
   // The recovered application does not expose an active-project API.  Its save
   // operation does, however, update exactly one project's timestamp.  Remember
@@ -82,7 +100,7 @@ async function savedProjectAfterLegacySave() {
 export function installBlankCanvasImageDrop() {
   let importing = false;
   const onDragOver = (event) => {
-    if (importing || !canvasPane(event.target) || !droppedImages(event.dataTransfer).length) return;
+    if (importing || !canvasPane(event.target) || ![...event.dataTransfer.files || []].length) return;
     // We only claim an image drop over blank canvas.  Existing upload nodes keep
     // their original drag/drop handlers and retain full ownership of the event.
     event.preventDefault();
@@ -92,14 +110,15 @@ export function installBlankCanvasImageDrop() {
     const pane = canvasPane(event.target);
     const allFiles = [...(event.dataTransfer?.files || [])];
     const files = droppedImages(event.dataTransfer);
+    const references = droppedFileReferences(allFiles);
     if (importing || !pane || !allFiles.length) return;
     event.preventDefault();
-    if (!files.length) return toast("空白画布只支持拖入图片文件。", "error");
-    if (files.length !== allFiles.length) toast("已跳过非图片或重复文件。", "info");
-    if (files.length > 20) return toast("一次最多拖入 20 张图片。", "error");
-    const tooLarge = files.find((file) => file.size > MAX_FILE_BYTES);
+    if (!files.length && !references.length) return toast("空白画布支持图片、视频、音频和常见文档。", "error");
+    if (files.length + references.length !== allFiles.length) toast("已跳过不支持或重复的文件。", "info");
+    if (files.length + references.length > 20) return toast("一次最多拖入 20 个文件。", "error");
+    const tooLarge = [...files, ...references].find((file) => file.size > MAX_FILE_BYTES);
     if (tooLarge) return toast(`${tooLarge.name} 超过 30 MB，未导入。`, "error");
-    const totalBytes = files.reduce((total, file) => total + file.size, 0);
+    const totalBytes = [...files, ...references].reduce((total, file) => total + file.size, 0);
     if (totalBytes > MAX_BATCH_BYTES) return toast("本次图片总量超过 60 MB。请分批拖入，避免画布卡顿。", "error");
     importing = true;
     try {
@@ -108,13 +127,18 @@ export function installBlankCanvasImageDrop() {
       const project = await savedProjectAfterLegacySave();
       if (!project) return toast("请先在旧画布中保存项目，再拖入图片。", "info");
       if (!project?.id) throw new Error("没有找到已保存的项目；请打开项目后再试");
-      const accepted = window.confirm(`将 ${files.length} 张图片导入“${project.name}”并重新载入画布吗？\n\n图片会保存到 F 盘媒体库；此操作可用画布撤销。`);
+      const accepted = window.confirm(`将 ${files.length} 张图片和 ${references.length} 个文件导入“${project.name}”并重新载入画布吗？\n\n文件会保存到 F 盘媒体库；此操作可用画布撤销。`);
       if (!accepted) return;
       const images = [];
       for (const file of files) images.push({ source: await readAsDataUrl(file), fileName: file.name });
       const point = canvasPosition(pane, event);
-      await invoke("append_blank_canvas_images", { projectId: project.id, images, ...point });
-      toast(`已导入 ${images.length} 张图片，正在重新载入画布。`, "success");
+      if (images.length) await invoke("append_blank_canvas_images", { projectId: project.id, images, ...point });
+      if (references.length) {
+        const imported = [];
+        for (const file of references) imported.push({ source: await readAsDataUrl(file), fileName: file.name, category: fileCategory(file) });
+        await invoke("append_blank_canvas_file_references", { projectId: project.id, files: imported, ...point });
+      }
+      toast(`已导入 ${images.length} 张图片和 ${references.length} 个文件，正在重新载入画布。`, "success");
       window.setTimeout(() => window.location.reload(), 550);
     } catch (error) {
       toast(`图片未导入：${String(error)}`, "error");

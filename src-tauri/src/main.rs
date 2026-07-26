@@ -516,8 +516,17 @@ struct BlankCanvasImageInput {
     file_name: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BlankCanvasFileInput {
+    source: String,
+    file_name: String,
+    category: String,
+}
+
 const MAX_BLANK_CANVAS_IMAGE_COUNT: usize = 20;
 const MAX_BLANK_CANVAS_IMAGE_SOURCE_BYTES: usize = 84 * 1024 * 1024;
+const MAX_BLANK_CANVAS_FILE_SOURCE_BYTES: usize = 42 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -4735,6 +4744,64 @@ fn apply_canvas_batch_action(
 }
 
 #[tauri::command]
+fn append_blank_canvas_file_references(
+    app: AppHandle,
+    project_id: String,
+    files: Vec<BlankCanvasFileInput>,
+    x: f64,
+    y: f64,
+    lock: State<StoreLock>,
+) -> Result<ProjectRecord, String> {
+    if files.is_empty() || files.len() > MAX_BLANK_CANVAS_IMAGE_COUNT {
+        return Err("drop between 1 and 20 files at a time".to_string());
+    }
+    if !x.is_finite() || !y.is_finite() { return Err("invalid canvas drop position".to_string()); }
+    let _guard = lock.0.lock().map_err(|_| "project store lock poisoned".to_string())?;
+    let mut connection = open_projects(&app)?;
+    let project = get_project_record_from_db(&connection, &project_id)?.ok_or("project not found".to_string())?;
+    let mut nodes = project_nodes(&project)?;
+    let edges = project_edges(&project)?;
+    let before_nodes = nodes.clone();
+    let before_edges = edges.clone();
+    let mut created_media = Vec::<PathBuf>::new();
+    let result = (|| -> Result<ProjectRecord, String> {
+        for (index, file) in files.into_iter().enumerate() {
+            if file.file_name.trim().is_empty() || file.file_name.chars().count() > 240 || file.source.len() > MAX_BLANK_CANVAS_FILE_SOURCE_BYTES {
+                return Err("dropped file is invalid or too large".to_string());
+            }
+            let category = normalized_asset_category(&file.category)?;
+            let path = persist_media_source(&app, category, file.source)?;
+            let path_buf = PathBuf::from(&path);
+            created_media.push(path_buf.clone());
+            let column = (index % 3) as f64;
+            let row = (index / 3) as f64;
+            // `text` is a legacy-supported canvas node type. Extra attachment
+            // data is additive, so an older canvas still renders a readable
+            // card while this compatibility layer can later add previews.
+            nodes.push(serde_json::json!({
+                "id": format!("file-{}", Uuid::new_v4()),
+                "type": "text",
+                "position": {"x": x + column * 300.0, "y": y + row * 190.0},
+                "data": {
+                    "label": file.file_name,
+                    "prompt": format!("本地{}文件", category),
+                    "filePath": path,
+                    "fileType": category,
+                    "sourceFileName": file.file_name
+                }
+            }));
+        }
+        let transaction = connection.transaction().map_err(|error| error.to_string())?;
+        let updated = write_project_canvas(&transaction, &project, &nodes, &edges)?;
+        record_canvas_batch_history(&transaction, &project_id, "blank-file-drop", &before_nodes, &before_edges, &nodes, &edges)?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(updated)
+    })();
+    if result.is_err() { for path in created_media { let _ = fs::remove_file(path); } }
+    result
+}
+
+#[tauri::command]
 fn append_blank_canvas_images(
     app: AppHandle,
     project_id: String,
@@ -6702,6 +6769,7 @@ fn main() {
             find_project_for_canvas_selection,
             preview_canvas_batch_action,
             apply_canvas_batch_action,
+            append_blank_canvas_file_references,
             append_blank_canvas_images,
             append_image_source_to_canvas,
             undo_last_canvas_batch_action,
