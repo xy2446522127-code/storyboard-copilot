@@ -4,3 +4,7 @@
 #huahai-module-root textarea { font: inherit; }
 
 #huahai-module-root button { -webkit-app-region: no-drag; }
+
+/* The recovered header still requests its historical logo path.  Render the
+   new icon without mutating React-owned markup or changing canvas event nodes. */
+#root img[src="/zy-logo.jpg"] { content: url("/huahai-canvas.png"); }

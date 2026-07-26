@@ -16,4 +16,4 @@ node scripts/publish-announcement.mjs --title "版本更新" --body "5.7.4 已�
 
 ## 删除或撤回公告
 
-在 GitHub 网页中编辑 `announcements.json`，删除对应对象后提交即可；也可以使用 Git 提交该文件。客户端会在下一次同步时不再显示该公告。新版客户端只读取此文件，**不会读取旧版知瑶画布的公告源**。
+在 GitHub 网页中编辑 `announcements.json`，删除对应对象后提交即可；也可以使用 Git 提交该文件。客户端会在下一次同步时不再显示该公告。新版客户端只读取此文件，**不会读取历史公告源**。
