@@ -464,6 +464,15 @@ mod tests {
             vec!["image-c", "image-a", "image-b"]
         );
     }
+
+    #[test]
+    fn local_file_import_categories_are_strict_and_stable() {
+        assert_eq!(normalized_asset_category("image").unwrap(), "images");
+        assert_eq!(normalized_asset_category("videos").unwrap(), "videos");
+        assert_eq!(normalized_asset_category("audio").unwrap(), "audio");
+        assert_eq!(normalized_asset_category("document").unwrap(), "documents");
+        assert!(normalized_asset_category("archive").is_err());
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
