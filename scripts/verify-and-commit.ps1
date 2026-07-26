@@ -7,11 +7,15 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = Resolve-Path (Join-Path $PSScriptRoot '..')
 $fBuildRoot = 'F:\Huahaihuabu\build-cache\verified-commits'
-if (-not $env:CARGO_TARGET_DIR -and (Test-Path 'F:\')) {
+if (Test-Path 'F:\') {
     New-Item -ItemType Directory -Force -Path $fBuildRoot | Out-Null
     $env:CARGO_TARGET_DIR = $fBuildRoot
 }
-if (-not $env:TEMP -or -not (Test-Path $env:TEMP) -or ((Get-PSDrive -Name C).Free -eq 0)) {
+if (Test-Path 'F:\') {
+    # Verification can invoke Node, Rust and external compilers.  Always pin
+    # their temporary files to F: rather than waiting for C: to become full.
+    # This keeps the product's no-C-drive-write promise true during development
+    # as well as in release builds.
     $fTemp = 'F:\Huahaihuabu\build-tmp\verified-commits'
     New-Item -ItemType Directory -Force -Path $fTemp | Out-Null
     $env:TEMP = $fTemp
