@@ -10,7 +10,14 @@ function canvasPane(target) {
 }
 
 function droppedImages(dataTransfer) {
-  return [...(dataTransfer?.files || [])].filter((file) => IMAGE_TYPES.has(file.type));
+  const seen = new Set();
+  return [...(dataTransfer?.files || [])].filter((file) => {
+    if (!IMAGE_TYPES.has(file.type)) return false;
+    const identity = `${file.name}::${file.size}::${file.lastModified}`;
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
 }
 
 function canvasPosition(pane, event) {
@@ -53,9 +60,12 @@ export function installBlankCanvasImageDrop() {
   };
   const onDrop = async (event) => {
     const pane = canvasPane(event.target);
+    const allFiles = [...(event.dataTransfer?.files || [])];
     const files = droppedImages(event.dataTransfer);
-    if (importing || !pane || !files.length) return;
+    if (importing || !pane || !allFiles.length) return;
     event.preventDefault();
+    if (!files.length) return toast("空白画布只支持拖入图片文件。", "error");
+    if (files.length !== allFiles.length) toast("已跳过非图片或重复文件。", "info");
     if (files.length > 20) return toast("一次最多拖入 20 张图片。", "error");
     const tooLarge = files.find((file) => file.size > MAX_FILE_BYTES);
     if (tooLarge) return toast(`${tooLarge.name} 超过 30 MB，未导入。`, "error");
@@ -66,7 +76,13 @@ export function installBlankCanvasImageDrop() {
       // React store remains the single source of truth until it has persisted.
       await new Promise((resolve) => window.setTimeout(resolve, 700));
       const projects = await invoke("list_project_summaries");
-      const project = projects[0];
+      let project = projects[0];
+      if (projects.length > 1) {
+        const choices = projects.slice(0, 12).map((item, index) => `${index + 1}. ${item.name}`).join("\n");
+        const choice = Number(window.prompt(`选择要导入图片的项目：\n${choices}`, "1"));
+        project = projects[choice - 1];
+        if (!Number.isInteger(choice) || !project) return;
+      }
       if (!project?.id) throw new Error("没有找到已保存的项目；请打开项目后再试");
       const accepted = window.confirm(`将 ${files.length} 张图片导入“${project.name}”并重新载入画布吗？\n\n图片会保存到 F 盘媒体库；此操作可用画布撤销。`);
       if (!accepted) return;
