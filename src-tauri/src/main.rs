@@ -2,6 +2,7 @@
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::Utc;
+use futures_util::StreamExt;
 use image::{imageops::FilterType, DynamicImage, GenericImageView, RgbaImage};
 use reqwest::{Client, Url};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
@@ -16,12 +17,47 @@ use std::{
 };
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tauri_plugin_updater::UpdaterExt;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 const PROJECT_HOMEPAGE: &str = "https://github.com/xy2446522127-code/storyboard-copilot";
 
 #[derive(Default)]
 struct StoreLock(Mutex<()>);
+
+#[derive(Default)]
+struct ChatStreamState(Mutex<HashMap<String, ChatStreamRecord>>);
+
+struct ChatStreamRecord {
+    cancel: CancellationToken,
+    status: String,
+    next_sequence: u64,
+    events: Vec<ChatStreamEvent>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatStreamEvent {
+    sequence: u64,
+    delta: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatStreamStart {
+    request_id: String,
+    user_message: ChatMessage,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatStreamPoll {
+    status: String,
+    events: Vec<ChatStreamEvent>,
+    error: Option<String>,
+    assistant_message: Option<ChatMessage>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -75,6 +111,12 @@ mod tests {
         ))
         .is_err());
     }
+
+    #[test]
+    fn chat_stream_delta_supports_openai_sse_shape() {
+        let event = serde_json::json!({"choices":[{"delta":{"content":"hello"}}]});
+        assert_eq!(chat_stream_delta(&event).as_deref(), Some("hello"));
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +156,22 @@ struct GenerationJob {
 struct BlankCanvasImageInput {
     source: String,
     file_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatAttachmentInput {
+    source: String,
+    file_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatAttachment {
+    file_name: String,
+    path: String,
+    mime_type: String,
+    size: u64,
 }
 
 /// A chat thread is deliberately kept separate from a project export.  This keeps a
@@ -1573,6 +1631,58 @@ fn prepare_node_image_source(
 }
 
 #[tauri::command]
+fn prepare_chat_attachments(
+    app: AppHandle,
+    attachments: Vec<ChatAttachmentInput>,
+) -> Result<Vec<ChatAttachment>, String> {
+    if attachments.is_empty() || attachments.len() > 4 {
+        return Err("attach between 1 and 4 images".to_string());
+    }
+    let mut total = 0_u64;
+    let mut prepared = Vec::with_capacity(attachments.len());
+    for attachment in attachments {
+        if attachment.file_name.trim().is_empty() || attachment.file_name.chars().count() > 240 {
+            return Err("attachment file name is invalid".to_string());
+        }
+        let header = attachment
+            .source
+            .split_once(',')
+            .map(|(header, _)| header)
+            .unwrap_or_default();
+        if !header.starts_with("data:image/") || !header.ends_with(";base64") {
+            return Err("only image attachments are supported".to_string());
+        }
+        let mime_type = header
+            .strip_prefix("data:")
+            .and_then(|value| value.split(';').next())
+            .unwrap_or("image/png")
+            .to_string();
+        let path = persist_media_source(&app, "chat-attachments", attachment.source)?;
+        let size = fs::metadata(&path)
+            .map_err(|error| error.to_string())?
+            .len();
+        total += size;
+        if size > 10 * 1024 * 1024 || total > 20 * 1024 * 1024 {
+            let _ = fs::remove_file(&path);
+            return Err(
+                "each attachment must be at most 10 MB and the total at most 20 MB".to_string(),
+            );
+        }
+        if image::open(&path).is_err() {
+            let _ = fs::remove_file(&path);
+            return Err("attachment is not a readable image".to_string());
+        }
+        prepared.push(ChatAttachment {
+            file_name: attachment.file_name,
+            path,
+            mime_type,
+            size,
+        });
+    }
+    Ok(prepared)
+}
+
+#[tauri::command]
 fn embed_storyboard_image_metadata(
     source: String,
     metadata: serde_json::Value,
@@ -1950,6 +2060,160 @@ fn chat_response_content(value: &serde_json::Value) -> Option<String> {
             .collect::<Vec<_>>()
             .join("")
     })
+}
+
+fn chat_stream_delta(value: &serde_json::Value) -> Option<String> {
+    let content = value
+        .pointer("/choices/0/delta/content")
+        .or_else(|| value.pointer("/data/choices/0/delta/content"))?;
+    if let Some(text) = content.as_str() {
+        return Some(text.to_string());
+    }
+    content.as_array().map(|parts| {
+        parts
+            .iter()
+            .filter_map(|part| {
+                part.get("text")
+                    .or_else(|| part.get("content"))
+                    .and_then(serde_json::Value::as_str)
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    })
+}
+
+fn chat_system_message(system_prompt: Option<String>) -> Result<String, String> {
+    let requested = system_prompt.unwrap_or_default().trim().to_string();
+    if requested.chars().count() > 4_000 {
+        return Err("system prompt must contain at most 4000 characters".to_string());
+    }
+    let safety = "You are the Flower Sea Canvas assistant. Give practical, concise creative help. Never claim to have executed an action. Canvas changes, deletes and paid generation must be returned as a preview for user confirmation. You may only propose these action types: createNodes, connectImagesToVideo, arrangeNodes, updateNodePrompts, generateImage, generateVideo, deleteNodes. Do not request or reveal API keys.";
+    Ok(if requested.is_empty() {
+        safety.to_string()
+    } else {
+        format!("{safety}\n\nAdditional instructions for this conversation:\n{requested}")
+    })
+}
+
+fn chat_attachments_from_json(
+    app: &AppHandle,
+    attachments_json: &str,
+) -> Result<Vec<ChatAttachment>, String> {
+    let attachments: Vec<ChatAttachment> = serde_json::from_str(attachments_json)
+        .map_err(|error| format!("invalid chat attachments: {error}"))?;
+    if attachments.len() > 4 {
+        return Err("a chat message can contain at most 4 attachments".to_string());
+    }
+    let root = media_dir(app, "chat-attachments")?;
+    let mut total = 0_u64;
+    for attachment in &attachments {
+        let path = PathBuf::from(&attachment.path);
+        if !path.starts_with(&root)
+            || !path.is_file()
+            || !attachment.mime_type.starts_with("image/")
+        {
+            return Err(
+                "chat attachment is no longer available in the local media library".to_string(),
+            );
+        }
+        let size = fs::metadata(&path)
+            .map_err(|error| error.to_string())?
+            .len();
+        if size != attachment.size || size > 10 * 1024 * 1024 {
+            return Err("chat attachment size is invalid".to_string());
+        }
+        total += size;
+    }
+    if total > 20 * 1024 * 1024 {
+        return Err("chat attachments exceed 20 MB".to_string());
+    }
+    Ok(attachments)
+}
+
+fn chat_user_content(
+    app: &AppHandle,
+    user_message: &ChatMessage,
+    send_originals: bool,
+) -> Result<serde_json::Value, String> {
+    let contextual_content = if user_message.context_json == "{}" {
+        user_message.content.clone()
+    } else {
+        format!(
+            "{}\n\nCurrent canvas metadata (no raw media): {}",
+            user_message.content, user_message.context_json
+        )
+    };
+    if !send_originals {
+        return Ok(serde_json::Value::String(contextual_content));
+    }
+    let attachments = chat_attachments_from_json(app, &user_message.attachments_json)?;
+    if attachments.is_empty() {
+        return Ok(serde_json::Value::String(contextual_content));
+    }
+    let mut parts = vec![serde_json::json!({"type":"text", "text": contextual_content})];
+    for attachment in attachments {
+        let bytes = fs::read(&attachment.path).map_err(|error| error.to_string())?;
+        let data_url = format!(
+            "data:{};base64,{}",
+            attachment.mime_type,
+            STANDARD.encode(bytes)
+        );
+        parts.push(serde_json::json!({"type":"image_url", "image_url":{"url": data_url}}));
+    }
+    Ok(serde_json::Value::Array(parts))
+}
+
+fn chat_api_messages(
+    app: &AppHandle,
+    history: &[ChatMessage],
+    user_message: &ChatMessage,
+    system_prompt: Option<String>,
+    send_originals: bool,
+) -> Result<Vec<serde_json::Value>, String> {
+    let mut messages = vec![serde_json::json!({
+        "role": "system",
+        "content": chat_system_message(system_prompt)?
+    })];
+    for message in history {
+        messages.push(serde_json::json!({"role": message.role, "content": message.content}));
+    }
+    messages.push(serde_json::json!({"role": "user", "content": chat_user_content(app, user_message, send_originals)?}));
+    Ok(messages)
+}
+
+fn append_chat_stream_delta(
+    state: &ChatStreamState,
+    request_id: &str,
+    delta: String,
+) -> Result<(), String> {
+    let mut records = state
+        .0
+        .lock()
+        .map_err(|_| "chat stream lock poisoned".to_string())?;
+    let record = records
+        .get_mut(request_id)
+        .ok_or("chat stream not found".to_string())?;
+    let event = ChatStreamEvent {
+        sequence: record.next_sequence,
+        delta,
+    };
+    record.next_sequence += 1;
+    record.events.push(event);
+    Ok(())
+}
+
+fn finish_chat_stream(
+    state: &ChatStreamState,
+    request_id: &str,
+    status: &str,
+    error: Option<String>,
+) {
+    if let Ok(mut records) = state.0.lock() {
+        if let Some(record) = records.get_mut(request_id) {
+            record.status = status.to_string();
+            record.error = error;
+        }
+    }
 }
 
 fn sanitize_chat_context(context_json: Option<String>) -> Result<String, String> {
@@ -2347,22 +2611,7 @@ async fn send_chat_message(
 
     let (base_url, api_key) = provider_credentials(&app, &provider_id)?;
     let endpoint = provider_endpoint(&base_url, "chat/completions")?;
-    let mut messages = vec![serde_json::json!({
-        "role": "system",
-        "content": "You are the Flower Sea Canvas assistant. Give practical, concise creative help. Never claim to have executed an action. Canvas changes, deletes and paid generation must be returned as a preview for user confirmation. You may only propose these action types: createNodes, connectImagesToVideo, arrangeNodes, updateNodePrompts, generateImage, generateVideo, deleteNodes. Do not request or reveal API keys."
-    })];
-    for message in history {
-        messages.push(serde_json::json!({"role": message.role, "content": message.content}));
-    }
-    let contextual_content = if user_message.context_json == "{}" {
-        user_message.content.clone()
-    } else {
-        format!(
-            "{}\n\nCurrent canvas metadata (no raw media): {}",
-            user_message.content, user_message.context_json
-        )
-    };
-    messages.push(serde_json::json!({"role": "user", "content": contextual_content}));
+    let messages = chat_api_messages(&app, &history, &user_message, None, false)?;
     let response = Client::new()
         .post(endpoint)
         .bearer_auth(api_key)
@@ -2400,6 +2649,290 @@ async fn send_chat_message(
         .map_err(|_| "project store lock poisoned".to_string())?;
     insert_chat_message(&open_projects(&app)?, &assistant_message)?;
     Ok(assistant_message)
+}
+
+#[tauri::command]
+fn start_chat_stream(
+    app: AppHandle,
+    session_id: String,
+    provider_id: String,
+    model: String,
+    content: String,
+    context_json: Option<String>,
+    system_prompt: Option<String>,
+    attachments_json: Option<String>,
+    send_originals: bool,
+    lock: State<StoreLock>,
+    streams: State<ChatStreamState>,
+) -> Result<ChatStreamStart, String> {
+    if content.trim().is_empty() || content.len() > 24_000 {
+        return Err("chat message must contain 1 to 24000 characters".to_string());
+    }
+    let context_json = sanitize_chat_context(context_json)?;
+    let system_prompt = system_prompt.filter(|value| !value.trim().is_empty());
+    // Validate before saving the user message so a local input error never
+    // creates an orphaned turn in the conversation history.
+    chat_system_message(system_prompt.clone())?;
+    // Validate configuration before persisting the user turn.  A missing key or
+    // malformed base URL should not leave a misleading pending message behind.
+    let (base_url, api_key) = provider_credentials(&app, &provider_id)?;
+    let endpoint = provider_endpoint(&base_url, "chat/completions")?;
+    let (history, user_message) = {
+        let _guard = lock
+            .0
+            .lock()
+            .map_err(|_| "project store lock poisoned".to_string())?;
+        let connection = open_projects(&app)?;
+        let session_exists: Option<String> = connection
+            .query_row(
+                "SELECT id FROM chat_sessions WHERE id = ?1",
+                [&session_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if session_exists.is_none() {
+            return Err("chat session not found".to_string());
+        }
+        let mut statement = connection
+            .prepare("SELECT id, session_id, role, content, context_json, attachments_json, status, created_at FROM chat_messages WHERE session_id = ?1 ORDER BY created_at DESC LIMIT 24")
+            .map_err(|error| error.to_string())?;
+        let mut history = statement
+            .query_map([&session_id], row_to_chat_message)
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        history.reverse();
+        let attachments_json = attachments_json.unwrap_or_else(|| "[]".to_string());
+        // Validate reference records before persisting them.  Raw bytes are only
+        // read later when the user explicitly opts in to sending originals.
+        chat_attachments_from_json(&app, &attachments_json)?;
+        let user_message = ChatMessage {
+            id: Uuid::new_v4().to_string(),
+            session_id: session_id.clone(),
+            role: "user".to_string(),
+            content,
+            context_json,
+            attachments_json,
+            status: "complete".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+        };
+        insert_chat_message(&connection, &user_message)?;
+        (history, user_message)
+    };
+    let messages = chat_api_messages(&app, &history, &user_message, system_prompt, send_originals)?;
+    let request_id = Uuid::new_v4().to_string();
+    let cancel = CancellationToken::new();
+    streams
+        .0
+        .lock()
+        .map_err(|_| "chat stream lock poisoned".to_string())?
+        .insert(
+            request_id.clone(),
+            ChatStreamRecord {
+                cancel: cancel.clone(),
+                status: "streaming".to_string(),
+                next_sequence: 1,
+                events: Vec::new(),
+                error: None,
+            },
+        );
+    let worker_app = app.clone();
+    let worker_request_id = request_id.clone();
+    let worker_session_id = session_id.clone();
+    tauri::async_runtime::spawn(async move {
+        let request = Client::new()
+            .post(endpoint)
+            .bearer_auth(api_key)
+            .json(&serde_json::json!({"model": model, "messages": messages, "stream": true}));
+        let response = tokio::select! {
+            _ = cancel.cancelled() => {
+                finish_chat_stream(worker_app.state::<ChatStreamState>().inner(), &worker_request_id, "cancelled", None);
+                return;
+            }
+            result = request.send() => result,
+        };
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                finish_chat_stream(
+                    worker_app.state::<ChatStreamState>().inner(),
+                    &worker_request_id,
+                    "failed",
+                    Some(format!("chat request failed: {error}")),
+                );
+                return;
+            }
+        };
+        let status = response.status();
+        if !status.is_success() {
+            let body = tokio::select! {
+                _ = cancel.cancelled() => {
+                    finish_chat_stream(worker_app.state::<ChatStreamState>().inner(), &worker_request_id, "cancelled", None);
+                    return;
+                }
+                text = response.text() => text.unwrap_or_default(),
+            };
+            finish_chat_stream(
+                worker_app.state::<ChatStreamState>().inner(),
+                &worker_request_id,
+                "failed",
+                Some(format!(
+                    "chat request failed ({status}): {}",
+                    body.chars().take(500).collect::<String>()
+                )),
+            );
+            return;
+        }
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+        let mut content = String::new();
+        loop {
+            let chunk = tokio::select! {
+                _ = cancel.cancelled() => {
+                    finish_chat_stream(worker_app.state::<ChatStreamState>().inner(), &worker_request_id, "cancelled", None);
+                    return;
+                }
+                chunk = stream.next() => chunk,
+            };
+            let Some(chunk) = chunk else { break };
+            let bytes = match chunk {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    finish_chat_stream(
+                        worker_app.state::<ChatStreamState>().inner(),
+                        &worker_request_id,
+                        "failed",
+                        Some(format!("chat stream interrupted: {error}")),
+                    );
+                    return;
+                }
+            };
+            buffer.push_str(&String::from_utf8_lossy(&bytes));
+            while let Some(line_end) = buffer.find('\n') {
+                let line = buffer[..line_end].trim_end_matches('\r').trim().to_string();
+                buffer.drain(..=line_end);
+                let Some(data) = line.strip_prefix("data:").map(str::trim) else {
+                    continue;
+                };
+                if data == "[DONE]" {
+                    continue;
+                }
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(delta) = chat_stream_delta(&value).filter(|delta| !delta.is_empty())
+                    {
+                        content.push_str(&delta);
+                        if append_chat_stream_delta(
+                            worker_app.state::<ChatStreamState>().inner(),
+                            &worker_request_id,
+                            delta,
+                        )
+                        .is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        if cancel.is_cancelled() {
+            finish_chat_stream(
+                worker_app.state::<ChatStreamState>().inner(),
+                &worker_request_id,
+                "cancelled",
+                None,
+            );
+            return;
+        }
+        if content.trim().is_empty() {
+            finish_chat_stream(
+                worker_app.state::<ChatStreamState>().inner(),
+                &worker_request_id,
+                "failed",
+                Some("chat stream did not contain message content".to_string()),
+            );
+            return;
+        }
+        let assistant_message = ChatMessage {
+            id: Uuid::new_v4().to_string(),
+            session_id: worker_session_id,
+            role: "assistant".to_string(),
+            content,
+            context_json: "{}".to_string(),
+            attachments_json: "[]".to_string(),
+            status: "complete".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+        };
+        let stored = worker_app
+            .state::<StoreLock>()
+            .0
+            .lock()
+            .map_err(|_| "project store lock poisoned".to_string())
+            .and_then(|_guard| {
+                insert_chat_message(&open_projects(&worker_app)?, &assistant_message)
+            });
+        match stored {
+            Ok(()) => finish_chat_stream(
+                worker_app.state::<ChatStreamState>().inner(),
+                &worker_request_id,
+                "completed",
+                None,
+            ),
+            Err(error) => finish_chat_stream(
+                worker_app.state::<ChatStreamState>().inner(),
+                &worker_request_id,
+                "failed",
+                Some(error),
+            ),
+        }
+    });
+    Ok(ChatStreamStart {
+        request_id,
+        user_message,
+    })
+}
+
+#[tauri::command]
+fn poll_chat_stream(
+    request_id: String,
+    after_sequence: Option<u64>,
+    streams: State<ChatStreamState>,
+) -> Result<ChatStreamPoll, String> {
+    let records = streams
+        .0
+        .lock()
+        .map_err(|_| "chat stream lock poisoned".to_string())?;
+    let record = records
+        .get(&request_id)
+        .ok_or("chat stream not found".to_string())?;
+    let after = after_sequence.unwrap_or(0);
+    Ok(ChatStreamPoll {
+        status: record.status.clone(),
+        events: record
+            .events
+            .iter()
+            .filter(|event| event.sequence > after)
+            .cloned()
+            .collect(),
+        error: record.error.clone(),
+        assistant_message: None,
+    })
+}
+
+#[tauri::command]
+fn cancel_chat_stream(request_id: String, streams: State<ChatStreamState>) -> Result<(), String> {
+    let records = streams
+        .0
+        .lock()
+        .map_err(|_| "chat stream lock poisoned".to_string())?;
+    let record = records
+        .get(&request_id)
+        .ok_or("chat stream not found".to_string())?;
+    if record.status != "streaming" {
+        return Err("chat stream has already finished".to_string());
+    }
+    record.cancel.cancel();
+    Ok(())
 }
 
 #[tauri::command]
@@ -4303,6 +4836,7 @@ fn query_task_token(
 fn main() {
     tauri::Builder::default()
         .manage(StoreLock::default())
+        .manage(ChatStreamState::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let webview_data = PathBuf::from(r"F:\Huahaihuabu\花海画布\webview");
@@ -4339,6 +4873,7 @@ fn main() {
             split_image_source,
             merge_storyboard_images,
             prepare_node_image_source,
+            prepare_chat_attachments,
             embed_storyboard_image_metadata,
             read_storyboard_image_metadata,
             remove_bg,
@@ -4356,6 +4891,9 @@ fn main() {
             delete_chat_session,
             list_chat_messages,
             send_chat_message,
+            start_chat_stream,
+            poll_chat_stream,
+            cancel_chat_stream,
             create_agent_preview,
             resolve_agent_preview,
             execute_agent_preview,

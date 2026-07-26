@@ -28,9 +28,9 @@ export function installChatPanel({ openApiSettings } = {}) {
       <aside class="huahai-chat__sessions"><div><span>会话</span><button type="button" data-action="refresh" title="刷新">↻</button></div><div data-sessions></div></aside>
       <main class="huahai-chat__main">
         <div class="huahai-chat__settings"><select data-field="model" aria-label="对话模型"></select><button type="button" data-action="system">系统提示词</button><button type="button" data-action="retry">重试</button></div>
-        <div class="huahai-chat__system" hidden><textarea data-field="system" placeholder="系统提示词仅用于当前会话，不会保存 API Key 或本地路径。"></textarea></div>
+        <div class="huahai-chat__system" hidden><textarea data-field="system" placeholder="系统提示词仅用于当前会话；请勿填写 API Key 或本地路径。"></textarea></div>
         <div class="huahai-chat__messages" aria-live="polite"></div>
-        <form class="huahai-chat__composer"><textarea data-field="message" placeholder="输入创作需求；默认只发送当前选中节点摘要，不发送原图或全量画布。"></textarea><div class="huahai-chat__composer-actions"><button type="button" data-action="cancel" disabled>停止</button><button type="submit" data-action="send">发送</button></div><label class="huahai-chat__context"><input type="checkbox" data-field="context" checked> 发送当前选中节点摘要</label></form>
+        <form class="huahai-chat__composer"><textarea data-field="message" placeholder="输入创作需求；默认只发送当前选中节点摘要，不发送原图或全量画布。"></textarea><input data-field="attachments" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/avif" multiple hidden><div class="huahai-chat__attachment-list" data-attachments></div><div class="huahai-chat__composer-actions"><button type="button" data-action="attach">添加图片</button><button type="button" data-action="cancel" disabled>停止</button><button type="submit" data-action="send">发送</button></div><label class="huahai-chat__context"><input type="checkbox" data-field="context" checked> 发送当前选中节点摘要</label><label class="huahai-chat__context"><input type="checkbox" data-field="send-originals"> 本次发送原图（最多 4 张/20 MB）</label></form>
       </main>
     </div>`;
   document.body.append(panel);
@@ -38,10 +38,38 @@ export function installChatPanel({ openApiSettings } = {}) {
   const sessionsNode = panel.querySelector("[data-sessions]");
   const modelNode = panel.querySelector('[data-field="model"]');
   const messageInput = panel.querySelector('[data-field="message"]');
+  const attachmentInput = panel.querySelector('[data-field="attachments"]');
+  const attachmentList = panel.querySelector("[data-attachments]");
   let session = null;
   let projectId = null;
   let inFlight = false;
   let lastUserText = "";
+  let activeRequestId = null;
+  let attachments = [];
+
+  const updateAttachments = () => {
+    attachmentList.replaceChildren(...attachments.map((file, index) => {
+      const chip = document.createElement("span");
+      chip.textContent = `${file.name} (${Math.ceil(file.size / 1024)} KB) `;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.dataset.removeAttachment = String(index);
+      remove.textContent = "×";
+      chip.append(remove);
+      return chip;
+    }));
+    panel.querySelector('[data-field="send-originals"]').disabled = !attachments.length;
+  };
+  const addAttachments = (files) => {
+    const candidates = [...files].filter((file) => file.type.startsWith("image/"));
+    const next = [...attachments, ...candidates].slice(0, 4);
+    const total = next.reduce((sum, file) => sum + file.size, 0);
+    if (candidates.length !== files.length) toast("仅支持图片附件。", "error");
+    if (next.length < attachments.length + candidates.length) toast("一次对话最多添加 4 张图片。", "info");
+    if (total > 20 * 1024 * 1024 || next.some((file) => file.size > 10 * 1024 * 1024)) return toast("每张图片最多 10 MB，附件总量最多 20 MB。", "error");
+    attachments = next;
+    updateAttachments();
+  };
 
   const addMessage = (message, kind = message.role) => {
     const node = document.createElement("article");
@@ -56,7 +84,7 @@ export function installChatPanel({ openApiSettings } = {}) {
       const row = document.createElement("div");
       row.className = "huahai-chat__session";
       row.classList.toggle("is-active", item.id === session?.id);
-      row.innerHTML = `<button type="button" data-session="${item.id}" title="${item.title}">${item.title}</button><button type="button" data-rename="${item.id}" title="重命名">⋯</button>`;
+      row.innerHTML = `<button type="button" data-session="${item.id}" title="${item.title}">${item.title}</button><button type="button" data-rename="${item.id}" title="重命名">✎</button><button type="button" data-delete="${item.id}" title="删除会话">×</button>`;
       return row;
     }));
   };
@@ -93,6 +121,53 @@ export function installChatPanel({ openApiSettings } = {}) {
     panel.querySelector('[data-action="send"]').disabled = value;
     panel.querySelector('[data-action="cancel"]').disabled = !value;
   };
+  const appendActionPreview = (messageNode, content) => {
+    const actionsJson = extractActionPreview(content);
+    if (!actionsJson) return;
+    const preview = document.createElement("div");
+    preview.className = "huahai-chat__preview";
+    preview.innerHTML = "<span>检测到画布操作建议；执行前必须确认。</span><button type=\"button\">创建预览</button>";
+    preview.querySelector("button").addEventListener("click", async () => {
+      try {
+        const stored = await invoke("create_agent_preview", { sessionId: session.id, projectId, actionsJson });
+        const approved = window.confirm("操作预览已保存。确认后仍会显示影响范围和费用提示；是否确认？");
+        await invoke("resolve_agent_preview", { previewId: stored.id, confirm: approved });
+        toast(approved ? "操作预览已确认；请在画布中审核后应用。" : "操作预览已拒绝。", approved ? "success" : "info");
+      } catch (error) { toast(`无法创建操作预览：${String(error)}`, "error"); }
+    });
+    messageNode.append(preview);
+  };
+  const streamReply = async (requestId, pending) => {
+    let sequence = 0;
+    let answer = "";
+    while (activeRequestId === requestId) {
+      const status = await invoke("poll_chat_stream", { requestId, afterSequence: sequence });
+      for (const event of status.events || []) {
+        sequence = Math.max(sequence, event.sequence || 0);
+        answer += event.delta || "";
+      }
+      if (answer) pending.textContent = answer;
+      if (status.status === "completed") {
+        pending.className = "huahai-chat__message huahai-chat__message--assistant";
+        appendActionPreview(pending, answer);
+        activeRequestId = null;
+        await loadSessions();
+        return;
+      }
+      if (status.status === "cancelled") {
+        pending.remove();
+        activeRequestId = null;
+        toast("已停止生成；半截助手回答不会保存。", "info");
+        return;
+      }
+      if (status.status === "failed") {
+        pending.textContent = `对话失败：${status.error || "未知错误"}`;
+        activeRequestId = null;
+        return;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 180));
+    }
+  };
   const send = async (text = messageInput.value) => {
     const content = safeText(text);
     if (!content || inFlight) return;
@@ -104,30 +179,30 @@ export function installChatPanel({ openApiSettings } = {}) {
     setBusy(true);
     try {
       await ensureSession();
-      addMessage({ role: "user", content });
+      const context = panel.querySelector('[data-field="context"]').checked ? nodeContext() : {};
+      const preparedAttachments = attachments.length ? await invoke("prepare_chat_attachments", {
+        attachments: await Promise.all(attachments.map(async (file) => ({ source: await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(new Error(`无法读取 ${file.name}`)); reader.readAsDataURL(file); }), fileName: file.name }))),
+      }) : [];
+      const started = await invoke("start_chat_stream", {
+        sessionId: session.id,
+        providerId,
+        model,
+        content,
+        contextJson: JSON.stringify(context),
+        systemPrompt: safeText(panel.querySelector('[data-field="system"]').value) || null,
+        attachmentsJson: JSON.stringify(preparedAttachments),
+        sendOriginals: panel.querySelector('[data-field="send-originals"]').checked,
+      });
+      addMessage(started.userMessage);
       messageInput.value = "";
+      attachments = [];
+      attachmentInput.value = "";
+      panel.querySelector('[data-field="send-originals"]').checked = false;
+      updateAttachments();
       lastUserText = content;
       const pending = addMessage("正在等待模型回复…", "status");
-      const context = panel.querySelector('[data-field="context"]').checked ? nodeContext() : {};
-      const reply = await invoke("send_chat_message", { sessionId: session.id, providerId, model, content, contextJson: JSON.stringify({ ...context, systemPrompt: safeText(panel.querySelector('[data-field="system"]').value) }) });
-      pending.remove();
-      const messageNode = addMessage(reply);
-      const actionsJson = extractActionPreview(reply.content);
-      if (actionsJson) {
-        const preview = document.createElement("div");
-        preview.className = "huahai-chat__preview";
-        preview.innerHTML = '<span>检测到画布操作建议；执行前必须确认。</span><button type="button">创建预览</button>';
-        preview.querySelector("button").addEventListener("click", async () => {
-          try {
-            const stored = await invoke("create_agent_preview", { sessionId: session.id, projectId, actionsJson });
-            const approved = window.confirm("操作预览已保存。确认后仍会显示影响范围和费用提示；是否确认？");
-            await invoke("resolve_agent_preview", { previewId: stored.id, confirm: approved });
-            toast(approved ? "操作预览已确认；请在画布中审核后应用。" : "操作预览已拒绝。", approved ? "success" : "info");
-          } catch (error) { toast(`无法创建操作预览：${String(error)}`, "error"); }
-        });
-        messageNode.append(preview);
-      }
-      await loadSessions();
+      activeRequestId = started.requestId;
+      await streamReply(activeRequestId, pending);
     } catch (error) { addMessage(`对话失败：${String(error)}`, "status"); }
     finally { setBusy(false); }
   };
@@ -135,6 +210,9 @@ export function installChatPanel({ openApiSettings } = {}) {
     const action = event.target.closest("[data-action]")?.dataset.action;
     const sessionId = event.target.closest("[data-session]")?.dataset.session;
     const renameId = event.target.closest("[data-rename]")?.dataset.rename;
+    const deleteId = event.target.closest("[data-delete]")?.dataset.delete;
+    const removeAttachment = event.target.closest("[data-remove-attachment]")?.dataset.removeAttachment;
+    if (removeAttachment !== undefined) { attachments.splice(Number(removeAttachment), 1); updateAttachments(); return; }
     if (sessionId) { session = (await invoke("list_chat_sessions", { projectId })).find((item) => item.id === sessionId) || null; await loadMessages(); await loadSessions(); }
     if (renameId) {
       const item = (await invoke("list_chat_sessions", { projectId })).find((entry) => entry.id === renameId);
@@ -143,14 +221,36 @@ export function installChatPanel({ openApiSettings } = {}) {
       if (!title.trim()) return toast("会话名称不能为空。", "error");
       await invoke("rename_chat_session", { sessionId: renameId, title }); await loadSessions();
     }
+    if (deleteId) {
+      if (!window.confirm("删除这个会话及其本地消息吗？此操作不能撤销。")) return;
+      await invoke("delete_chat_session", { sessionId: deleteId });
+      if (session?.id === deleteId) { session = null; messages.replaceChildren(); }
+      await loadSessions();
+    }
     if (action === "close") panel.classList.remove("is-open");
+    if (action === "attach") attachmentInput.click();
     if (action === "new") { session = null; messages.replaceChildren(); await ensureSession(); }
     if (action === "refresh") { await loadModels(); await loadSessions(); }
     if (action === "retry" && lastUserText) send(lastUserText);
-    if (action === "cancel" && inFlight) toast("当前版本正在接入流式取消；本次请求会完成但不会执行任何画布操作。", "info");
+    if (action === "cancel" && inFlight && activeRequestId) {
+      try { await invoke("cancel_chat_stream", { requestId: activeRequestId }); }
+      catch (error) { toast(`无法停止生成：${String(error)}`, "error"); }
+    }
     if (action === "system") { const box = panel.querySelector(".huahai-chat__system"); box.hidden = !box.hidden; }
   });
   panel.querySelector("form").addEventListener("submit", (event) => { event.preventDefault(); send(); });
+  attachmentInput.addEventListener("change", () => { addAttachments(attachmentInput.files || []); attachmentInput.value = ""; });
+  messageInput.addEventListener("paste", (event) => {
+    const files = [...(event.clipboardData?.files || [])];
+    if (files.length) { event.preventDefault(); addAttachments(files); }
+  });
+  panel.querySelector(".huahai-chat__composer").addEventListener("dragover", (event) => {
+    if ([...(event.dataTransfer?.files || [])].some((file) => file.type.startsWith("image/"))) event.preventDefault();
+  });
+  panel.querySelector(".huahai-chat__composer").addEventListener("drop", (event) => {
+    if ([...(event.dataTransfer?.files || [])].some((file) => file.type.startsWith("image/"))) { event.preventDefault(); addAttachments(event.dataTransfer.files); }
+  });
+  updateAttachments();
   return {
     async open() {
       panel.classList.add("is-open");
