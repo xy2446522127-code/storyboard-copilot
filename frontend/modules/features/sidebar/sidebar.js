@@ -27,13 +27,15 @@ export function installSidebar({ openChat, openAnnouncements, openApiSettings, o
         <span class="huahai-sidebar__brand">花海画布</span>
         <button class="huahai-sidebar__collapse" type="button" title="收起侧栏">‹</button>
       </div>
-      <button class="huahai-sidebar__section" type="button" aria-expanded="false">›&nbsp;&nbsp;其他功能</button>
       <nav class="huahai-sidebar__nav">
         ${entries.map(([key, icon, label]) => `<button class="huahai-nav-button" type="button" data-nav="${key}"><span class="huahai-nav-icon">${icon}</span>${label}</button>`).join("")}
       </nav>
+      <button class="huahai-sidebar__section" type="button" aria-expanded="false"><span data-other-arrow>›</span>&nbsp;&nbsp;其他功能</button>
+      <nav class="huahai-sidebar__extra" aria-label="其他功能">
+        <button type="button" data-nav="announcements">公告</button>
+      </nav>
       <div class="huahai-sidebar__spacer"></div>
       <div class="huahai-sidebar__bottom">
-        <button type="button" data-nav="announcements">公告</button>
         <button type="button" data-nav="api">API 设置</button>
         <button type="button" data-nav="settings">更多设置</button>
         <button type="button" data-nav="homepage">项目主页</button>
@@ -52,6 +54,7 @@ export function installSidebar({ openChat, openAnnouncements, openApiSettings, o
     .catch(() => { versionLabel.textContent = "花海画布"; });
 
   const section = root.querySelector(".huahai-sidebar__section");
+  const otherArrow = root.querySelector("[data-other-arrow]");
   let lastCanvasActive = null;
   let canvasSyncQueued = false;
   const syncCanvasState = () => {
@@ -87,6 +90,7 @@ export function installSidebar({ openChat, openAnnouncements, openApiSettings, o
   section.addEventListener("click", () => {
     const expanded = section.getAttribute("aria-expanded") === "true";
     section.setAttribute("aria-expanded", String(!expanded));
+    otherArrow.textContent = expanded ? "›" : "⌄";
   });
 
   root.addEventListener("click", async (event) => {

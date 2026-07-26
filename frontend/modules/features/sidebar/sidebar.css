@@ -50,8 +50,11 @@ body.huahai-sidebar-open #huahai-sidebar { transform: translateX(0); }
 
 .huahai-sidebar__section[aria-expanded="true"] { color: var(--hh-text); background: rgba(104, 138, 234, .12); }
 .huahai-sidebar__nav { display: grid; gap: 4px; }
+.huahai-sidebar__extra { display: grid; gap: 4px; margin: -4px 0 8px; }
+.huahai-sidebar__section[aria-expanded="false"] + .huahai-sidebar__extra { display: none; }
 
 .huahai-nav-button,
+.huahai-sidebar__extra button,
 .huahai-sidebar__bottom button,
 .huahai-sidebar__collapse {
   display: flex;
@@ -71,9 +74,10 @@ body.huahai-sidebar-open #huahai-sidebar { transform: translateX(0); }
 .huahai-sidebar__collapse { width: auto; min-height: 34px; padding: 0 9px; color: var(--hh-muted); }
 .huahai-nav-button:hover,
 .huahai-nav-button.is-active,
+.huahai-sidebar__extra button:hover,
 .huahai-sidebar__bottom button:hover,
 .huahai-sidebar__collapse:hover { color: var(--hh-text); background: #eaf0fa; }
-.huahai-nav-button:hover, .huahai-sidebar__bottom button:hover, .huahai-sidebar__collapse:hover { color: #182034; }
+.huahai-nav-button:hover, .huahai-sidebar__extra button:hover, .huahai-sidebar__bottom button:hover, .huahai-sidebar__collapse:hover { color: #182034; }
 .huahai-nav-icon { width: 20px; text-align: center; color: currentColor; font-size: 18px; }
 
 .huahai-sidebar__spacer { flex: 1; min-height: 22px; }
