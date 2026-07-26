@@ -44,7 +44,16 @@ export function installCanvasBatchTools() {
   };
   document.addEventListener("pointerup", delayedRefresh, true);
   document.addEventListener("keyup", delayedRefresh, true);
-  new MutationObserver(delayedRefresh).observe(document.getElementById("root"), { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
+  const nodeSelector = ".react-flow__node, .xyflow__node";
+  const selectionObserver = new MutationObserver((mutations) => {
+    const selectionChanged = mutations.some((mutation) => {
+      if (mutation.type === "attributes") return mutation.target instanceof Element && mutation.target.matches(nodeSelector);
+      return [...mutation.addedNodes, ...mutation.removedNodes].some((node) => node instanceof Element && (node.matches(nodeSelector) || node.querySelector?.(nodeSelector)));
+    });
+    if (selectionChanged) delayedRefresh();
+  });
+  selectionObserver.observe(document.getElementById("root"), { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
+  window.addEventListener("pagehide", () => selectionObserver.disconnect(), { once: true });
 
   toolbar.addEventListener("click", async (event) => {
     const action = event.target.closest("[data-batch-action]")?.dataset.batchAction;
