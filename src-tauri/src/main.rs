@@ -135,6 +135,18 @@ mod tests {
     }
 
     #[test]
+    fn only_f_drive_paths_are_accepted_for_user_output() {
+        assert!(is_f_drive_path(std::path::Path::new(
+            r"F:\花海画布\exports"
+        )));
+        assert!(is_f_drive_path(std::path::Path::new("f:/花海画布/exports")));
+        assert!(!is_f_drive_path(std::path::Path::new(
+            r"C:\Users\DXY\Downloads"
+        )));
+        assert!(!is_f_drive_path(std::path::Path::new(r"\\server\share")));
+    }
+
+    #[test]
     fn connected_arrangement_respects_edges_and_keeps_sibling_order_stable() {
         let stable = vec![
             "image-b".to_string(),
@@ -653,6 +665,21 @@ fn media_dir(app: &AppHandle, category: &str) -> Result<PathBuf, String> {
     let path = app_dir(app)?.join("media").join(category);
     fs::create_dir_all(&path).map_err(|error| error.to_string())?;
     Ok(path)
+}
+
+fn is_f_drive_path(path: &std::path::Path) -> bool {
+    let value = path.as_os_str().to_string_lossy();
+    let bytes = value.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].eq_ignore_ascii_case(&b'f')
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+}
+
+fn export_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let directory = app_dir(app)?.join("exports");
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    Ok(directory)
 }
 
 fn extension_from_data_url(source: &str, fallback: &str) -> String {
@@ -1413,8 +1440,9 @@ fn save_image_to_downloads(
     if !source_path.is_file() {
         return Err("remote images must be saved locally before downloading".to_string());
     }
-    let download_dir = dirs::download_dir().ok_or("Downloads folder is unavailable")?;
-    fs::create_dir_all(&download_dir).map_err(|error| error.to_string())?;
+    // The product never writes generated output to the Windows Downloads folder,
+    // which is normally on C:. User media remains under the F-drive workspace.
+    let download_dir = export_dir(&app)?;
     let name = safe_file_name(&filename, "png");
     let destination = download_dir.join(&name);
     if source_path == destination {
@@ -5081,17 +5109,14 @@ fn jimeng_get_video_status(job_id: String) -> Result<serde_json::Value, String> 
 }
 
 #[tauri::command]
-fn get_default_save_dir() -> String {
-    dirs::download_dir()
-        .unwrap_or_else(|| std::env::temp_dir())
-        .display()
-        .to_string()
+fn get_default_save_dir(app: AppHandle) -> Result<String, String> {
+    Ok(export_dir(&app)?.display().to_string())
 }
 
 #[tauri::command]
 fn validate_save_dir(path: String) -> bool {
     let path = PathBuf::from(path);
-    path.is_dir() || fs::create_dir_all(path).is_ok()
+    is_f_drive_path(&path) && (path.is_dir() || fs::create_dir_all(path).is_ok())
 }
 
 #[tauri::command]
