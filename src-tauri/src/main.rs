@@ -248,12 +248,12 @@ mod tests {
     }
 
     #[test]
-    fn model_connection_probe_counts_openai_model_arrays() {
+    fn model_response_extracts_openai_model_arrays() {
         assert_eq!(
-            remote_model_count(&serde_json::json!({"data":[{"id":"one"},{"id":"two"}]})),
+            strings_from_models(&serde_json::json!({"data":[{"id":"one"},{"id":"two"}]})).len(),
             2
         );
-        assert_eq!(remote_model_count(&serde_json::json!({"models":[]})), 0);
+        assert!(strings_from_models(&serde_json::json!({"models":[]})).is_empty());
     }
 
     #[test]
@@ -629,14 +629,6 @@ fn image_results_from_response(value: &serde_json::Value) -> Vec<String> {
 
 fn image_result_from_response(value: &serde_json::Value) -> Option<String> {
     image_results_from_response(value).into_iter().next()
-}
-
-fn remote_model_count(value: &serde_json::Value) -> usize {
-    value
-        .get("data")
-        .or_else(|| value.get("models"))
-        .and_then(serde_json::Value::as_array)
-        .map_or(0, Vec::len)
 }
 
 fn image_job_request_metadata(request: &serde_json::Value) -> String {
