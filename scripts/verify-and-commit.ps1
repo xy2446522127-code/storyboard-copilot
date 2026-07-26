@@ -50,6 +50,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Command coverage verification failed.' }
     node (Join-Path $PSScriptRoot 'verify-release-config.mjs')
     if ($LASTEXITCODE -ne 0) { throw 'Release configuration verification failed.' }
+    node (Join-Path $PSScriptRoot 'verify-media-performance.mjs')
+    if ($LASTEXITCODE -ne 0) { throw 'Media performance verification failed.' }
     git diff --check
     if ($LASTEXITCODE -ne 0) { throw 'Whitespace verification failed.' }
 
