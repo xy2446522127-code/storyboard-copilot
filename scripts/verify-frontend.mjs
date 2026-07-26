@@ -53,4 +53,9 @@ for (const script of scripts) {
   }
 }
 
+const shellStyles = readFileSync(resolve(root, "frontend/modules/styles/shell.css"), "utf8");
+if (!shellStyles.includes('img[src="/zy-logo.jpg"]') || !shellStyles.includes('url("/huahai-canvas.png")')) {
+  throw new Error("Recovered header logo must render the 花海画布 icon without React DOM mutation.");
+}
+
 console.log(`Recovered frontend assets, ${scripts.length - 1} modules, and credential scan passed.`);
