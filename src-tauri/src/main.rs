@@ -13,7 +13,7 @@ use std::{
     io::Write,
     path::PathBuf,
     process::{Command, Stdio},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
@@ -29,6 +29,13 @@ struct StoreLock(Mutex<()>);
 
 #[derive(Default)]
 struct ChatStreamState(Mutex<HashMap<String, ChatStreamRecord>>);
+
+// Image generation is deliberately tracked separately from chat streaming.  A
+// generation request can take minutes at a provider, while the user must be
+// able to stop *local* waiting immediately without pretending that a paid
+// remote request was cancelled.
+#[derive(Default, Clone)]
+struct GenerationJobState(Arc<Mutex<HashMap<String, CancellationToken>>>);
 
 struct ChatStreamRecord {
     cancel: CancellationToken,
@@ -146,6 +153,26 @@ mod tests {
         assert!(metadata.contains("referenceCount"));
         assert!(!metadata.contains("data:image"));
         assert!(!metadata.contains("private-media"));
+    }
+
+    #[test]
+    fn stopping_local_image_waiting_is_explicit_and_terminal() {
+        let mut job = GenerationJob {
+            job_id: "job-1".to_string(),
+            provider_id: "provider".to_string(),
+            kind: "image".to_string(),
+            status: "pending".to_string(),
+            progress: 0,
+            result: None,
+            error: None,
+            remote_job_id: Some("remote-1".to_string()),
+            request_json: "{}".to_string(),
+            updated_at: "".to_string(),
+        };
+        cancel_background_image_job_record(&mut job);
+        assert_eq!(job.status, "cancelled");
+        assert!(job.error.as_deref().unwrap_or_default().contains("remote"));
+        assert!(!job.updated_at.is_empty());
     }
 
     #[test]
@@ -4890,6 +4917,194 @@ async fn submit_generate_image_job(
     Ok(job.job_id)
 }
 
+fn save_background_image_job(app: &AppHandle, job: &GenerationJob) {
+    if let Ok(connection) = open_projects(app) {
+        let _ = save_generation_job(&connection, job);
+    }
+}
+
+fn cancel_background_image_job_record(job: &mut GenerationJob) {
+    job.status = "cancelled".to_string();
+    job.error = Some(
+        "Stopped local waiting. A request already accepted by the provider may still continue remotely."
+            .to_string(),
+    );
+    job.updated_at = Utc::now().to_rfc3339();
+}
+
+async fn run_background_image_job(
+    app: AppHandle,
+    request: serde_json::Value,
+    base_url: String,
+    api_key: String,
+    mut job: GenerationJob,
+    cancel: CancellationToken,
+) {
+    let client = match Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            job.status = "failed".to_string();
+            job.error = Some(format!("Could not prepare image request: {error}"));
+            job.updated_at = Utc::now().to_rfc3339();
+            save_background_image_job(&app, &job);
+            return;
+        }
+    };
+    let endpoint = match provider_endpoint(&base_url, "images/generations") {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            job.status = "failed".to_string();
+            job.error = Some(error);
+            job.updated_at = Utc::now().to_rfc3339();
+            save_background_image_job(&app, &job);
+            return;
+        }
+    };
+    let response = tokio::select! {
+        _ = cancel.cancelled() => None,
+        response = client.post(endpoint).bearer_auth(api_key).json(&request).send() => Some(response),
+    };
+    match response {
+        None => cancel_background_image_job_record(&mut job),
+        Some(Ok(response)) => {
+            let status = response.status();
+            if cancel.is_cancelled() {
+                cancel_background_image_job_record(&mut job);
+            } else if !status.is_success() {
+                // Never store provider bodies.  Proxies can echo request headers,
+                // while the HTTP status is the useful and safe recovery signal.
+                job.status = "failed".to_string();
+                job.error = Some(format!("Image generation request failed ({status})"));
+            } else {
+                match response.json::<serde_json::Value>().await {
+                    Ok(_value) if cancel.is_cancelled() => cancel_background_image_job_record(&mut job),
+                    Ok(value) => {
+                        job.remote_job_id = remote_job_id_from_response(&value);
+                        match persist_generated_image_result(&app, image_result_from_response(&value)) {
+                            Ok(result) => {
+                                job.result = result;
+                                job.status = if job.result.is_some() {
+                                    "succeeded".to_string()
+                                } else {
+                                    response_status(&value, "pending")
+                                };
+                                job.progress = if job.status == "succeeded" { 100 } else { 0 };
+                                job.error = value
+                                    .get("error")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(ToOwned::to_owned);
+                            }
+                            Err(error) => {
+                                job.status = "failed".to_string();
+                                job.error = Some(format!("Could not save generated image: {error}"));
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        job.status = "failed".to_string();
+                        job.error = Some(format!("Image provider returned invalid JSON: {error}"));
+                    }
+                }
+            }
+        }
+        Some(Err(error)) => {
+            job.status = "failed".to_string();
+            job.error = Some(format!("Image generation request failed: {error}"));
+        }
+    }
+    job.updated_at = Utc::now().to_rfc3339();
+    save_background_image_job(&app, &job);
+}
+
+#[tauri::command]
+fn submit_image_studio_job(
+    app: AppHandle,
+    payload: String,
+    lock: State<'_, StoreLock>,
+    jobs: State<'_, GenerationJobState>,
+) -> Result<String, String> {
+    let request: serde_json::Value = serde_json::from_str(&payload)
+        .map_err(|error| format!("invalid image request: {error}"))?;
+    let provider_id = request
+        .get("provider_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or("image request is missing provider_id")?
+        .to_string();
+    // Validate the local configuration before creating visible task state.
+    let (base_url, api_key) = provider_credentials(&app, &provider_id)?;
+    let job = GenerationJob {
+        job_id: Uuid::new_v4().to_string(),
+        provider_id,
+        kind: "image".to_string(),
+        status: "pending".to_string(),
+        progress: 0,
+        result: None,
+        error: None,
+        remote_job_id: None,
+        request_json: image_job_request_metadata(&request),
+        updated_at: Utc::now().to_rfc3339(),
+    };
+    {
+        let _guard = lock
+            .0
+            .lock()
+            .map_err(|_| "generation job lock poisoned".to_string())?;
+        save_generation_job(&open_projects(&app)?, &job)?;
+    }
+    let cancellation = CancellationToken::new();
+    jobs.0
+        .lock()
+        .map_err(|_| "generation job state lock poisoned".to_string())?
+        .insert(job.job_id.clone(), cancellation.clone());
+    let job_id = job.job_id.clone();
+    let worker_job_id = job_id.clone();
+    let jobs = jobs.inner().clone();
+    tauri::async_runtime::spawn(async move {
+        run_background_image_job(app, request, base_url, api_key, job, cancellation).await;
+        if let Ok(mut active) = jobs.0.lock() {
+            active.remove(&worker_job_id);
+        }
+    });
+    Ok(job_id)
+}
+
+#[tauri::command]
+fn cancel_image_studio_job(
+    app: AppHandle,
+    job_id: String,
+    lock: State<'_, StoreLock>,
+    jobs: State<'_, GenerationJobState>,
+) -> Result<GenerationJob, String> {
+    let token = jobs
+        .0
+        .lock()
+        .map_err(|_| "generation job state lock poisoned".to_string())?
+        .get(&job_id)
+        .cloned();
+    let _guard = lock
+        .0
+        .lock()
+        .map_err(|_| "generation job lock poisoned".to_string())?;
+    let connection = open_projects(&app)?;
+    let mut job = get_generation_job(&connection, &job_id)?.ok_or("generation job not found")?;
+    if job.kind != "image" {
+        return Err("generation job is not an image job".to_string());
+    }
+    if job.status != "pending" {
+        return Ok(job);
+    }
+    if let Some(token) = token {
+        token.cancel();
+    }
+    cancel_background_image_job_record(&mut job);
+    save_generation_job(&connection, &job)?;
+    Ok(job)
+}
+
 #[tauri::command]
 fn list_generate_image_jobs(
     app: AppHandle,
@@ -5357,6 +5572,7 @@ fn main() {
     tauri::Builder::default()
         .manage(StoreLock::default())
         .manage(ChatStreamState::default())
+        .manage(GenerationJobState::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // Migrate all mutable state out of the installation directory before
@@ -5468,6 +5684,8 @@ fn main() {
             jimeng_browser_generate,
             jimeng_submit_video,
             submit_generate_image_job,
+            submit_image_studio_job,
+            cancel_image_studio_job,
             list_generate_image_jobs,
             get_generate_image_job,
             generate_image,

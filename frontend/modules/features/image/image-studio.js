@@ -160,6 +160,7 @@ export function installImageStudio({ openApiSettings } = {}) {
       const state = document.createElement("strong");
       state.textContent = job.status === "succeeded" ? "已完成" : job.status === "failed" ? "失败" : "生成中";
       const model = document.createElement("span");
+      if (job.status === "cancelled") state.textContent = "已停止本地等待";
       model.textContent = job.modelLabel || "未标注模型";
       heading.append(state, model);
       const detail = document.createElement("p");
@@ -179,6 +180,11 @@ export function installImageStudio({ openApiSettings } = {}) {
         const actions = document.createElement("div"); actions.className = "huahai-image__job-actions";
         const reuse = document.createElement("button"); reuse.type = "button"; reuse.textContent = "复用参数"; reuse.addEventListener("click", () => restoreJobParameters(job));
         actions.append(reuse); card.append(actions);
+      }
+      if (job.status === "pending" && job.id) {
+        const actions = document.createElement("div"); actions.className = "huahai-image__job-actions";
+        const stop = document.createElement("button"); stop.type = "button"; stop.textContent = "停止本地等待"; stop.addEventListener("click", () => cancelJob(job));
+        actions.append(stop); card.append(actions);
       }
       return card;
     }));
@@ -213,12 +219,25 @@ export function installImageStudio({ openApiSettings } = {}) {
       if (latest.status === "pending") window.setTimeout(() => poll(job), 2200);
     } catch (error) { job.status = "failed"; job.error = String(error); renderJobs(); }
   };
+  const cancelJob = async (job) => {
+    if (!job?.id || job.status !== "pending") return;
+    if (!window.confirm("停止本地等待吗？如果服务商已接收请求，远端仍可能继续处理并产生费用。")) return;
+    try {
+      const stopped = await invoke("cancel_image_studio_job", { jobId: job.id });
+      job.status = stopped.status;
+      job.error = stopped.error || "";
+      renderJobs();
+      toast("已停止本地等待；应用不会继续查询此任务。", "info");
+    } catch (error) { toast(`无法停止任务：${String(error)}`, "error"); }
+  };
   const runJob = async ({ payload, prompt, modelLabel }) => {
     const job = { id: "", status: "pending", prompt, modelLabel, result: "", error: "", payload };
     jobs.unshift(job); renderJobs();
     try {
-      job.id = await invoke("submit_generate_image_job", { payload: JSON.stringify(payload) });
-      await poll(job);
+      // Persisting a studio task returns immediately, so a slow provider never
+      // blocks the form or prevents the user from stopping local waiting.
+      job.id = await invoke("submit_image_studio_job", { payload: JSON.stringify(payload) });
+      poll(job);
     } catch (error) { job.status = "failed"; job.error = String(error); renderJobs(); }
   };
   const retryJob = async (job) => {
