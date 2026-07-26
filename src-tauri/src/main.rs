@@ -115,6 +115,8 @@ struct ChatSession {
     project_id: Option<String>,
     title: String,
     model: String,
+    #[serde(default)]
+    provider_id: String,
     created_at: String,
     updated_at: String,
 }
@@ -127,6 +129,10 @@ struct ChatMessage {
     role: String,
     content: String,
     context_json: String,
+    #[serde(default)]
+    attachments_json: String,
+    #[serde(default)]
+    status: String,
     created_at: String,
 }
 
@@ -836,6 +842,10 @@ fn open_projects(app: &AppHandle) -> Result<Connection, String> {
             ",
         )
         .map_err(|error| error.to_string())?;
+    // Additive migrations keep every existing local chat readable.
+    let _ = connection.execute("ALTER TABLE chat_sessions ADD COLUMN provider_id TEXT NOT NULL DEFAULT ''", []);
+    let _ = connection.execute("ALTER TABLE chat_messages ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'", []);
+    let _ = connection.execute("ALTER TABLE chat_messages ADD COLUMN status TEXT NOT NULL DEFAULT 'complete'", []);
 
     let count: i64 = connection
         .query_row("SELECT COUNT(*) FROM projects", [], |row| row.get(0))
@@ -1850,8 +1860,9 @@ fn row_to_chat_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatSession>
         project_id: row.get(1)?,
         title: row.get(2)?,
         model: row.get(3)?,
-        created_at: row.get(4)?,
-        updated_at: row.get(5)?,
+        provider_id: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
     })
 }
 
@@ -1862,21 +1873,25 @@ fn row_to_chat_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage>
         role: row.get(2)?,
         content: row.get(3)?,
         context_json: row.get(4)?,
-        created_at: row.get(5)?,
+        attachments_json: row.get(5)?,
+        status: row.get(6)?,
+        created_at: row.get(7)?,
     })
 }
 
 fn insert_chat_message(connection: &Connection, message: &ChatMessage) -> Result<(), String> {
     connection
         .execute(
-            "INSERT INTO chat_messages (id, session_id, role, content, context_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO chat_messages (id, session_id, role, content, context_json, attachments_json, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 message.id,
                 message.session_id,
                 message.role,
                 message.content,
                 message.context_json,
+                message.attachments_json,
+                message.status,
                 message.created_at,
             ],
         )
@@ -2108,10 +2123,10 @@ fn list_chat_sessions(
     let connection = open_projects(&app)?;
     let mut statement = match project_id {
         Some(_) => connection
-            .prepare("SELECT id, project_id, title, model, created_at, updated_at FROM chat_sessions WHERE project_id = ?1 ORDER BY updated_at DESC")
+            .prepare("SELECT id, project_id, title, model, provider_id, created_at, updated_at FROM chat_sessions WHERE project_id = ?1 ORDER BY updated_at DESC")
             .map_err(|error| error.to_string())?,
         None => connection
-            .prepare("SELECT id, project_id, title, model, created_at, updated_at FROM chat_sessions WHERE project_id IS NULL ORDER BY updated_at DESC")
+            .prepare("SELECT id, project_id, title, model, provider_id, created_at, updated_at FROM chat_sessions WHERE project_id IS NULL ORDER BY updated_at DESC")
             .map_err(|error| error.to_string())?,
     };
     let rows = match project_id {
@@ -2129,6 +2144,7 @@ fn create_chat_session(
     project_id: Option<String>,
     title: Option<String>,
     model: Option<String>,
+    provider_id: Option<String>,
     lock: State<StoreLock>,
 ) -> Result<ChatSession, String> {
     let _guard = lock
@@ -2143,24 +2159,56 @@ fn create_chat_session(
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "新对话".to_string()),
         model: model.unwrap_or_default(),
+        provider_id: provider_id.unwrap_or_default(),
         created_at: now.clone(),
         updated_at: now,
     };
     open_projects(&app)?
         .execute(
-            "INSERT INTO chat_sessions (id, project_id, title, model, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO chat_sessions (id, project_id, title, model, provider_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 session.id,
                 session.project_id,
                 session.title,
                 session.model,
+                session.provider_id,
                 session.created_at,
                 session.updated_at
             ],
         )
         .map_err(|error| error.to_string())?;
     Ok(session)
+}
+
+#[tauri::command]
+fn rename_chat_session(
+    app: AppHandle,
+    session_id: String,
+    title: String,
+    lock: State<StoreLock>,
+) -> Result<(), String> {
+    let title = title.trim();
+    if title.is_empty() || title.chars().count() > 120 { return Err("会话名称应为 1 到 120 个字符".to_string()); }
+    let _guard = lock.0.lock().map_err(|_| "project store lock poisoned".to_string())?;
+    let changed = open_projects(&app)?.execute(
+        "UPDATE chat_sessions SET title = ?1, updated_at = ?2 WHERE id = ?3",
+        params![title, Utc::now().to_rfc3339(), session_id],
+    ).map_err(|error| error.to_string())?;
+    if changed == 0 { return Err("chat session not found".to_string()); }
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_chat_session(app: AppHandle, session_id: String, lock: State<StoreLock>) -> Result<(), String> {
+    let _guard = lock.0.lock().map_err(|_| "project store lock poisoned".to_string())?;
+    let connection = open_projects(&app)?;
+    let transaction = connection.unchecked_transaction().map_err(|error| error.to_string())?;
+    transaction.execute("DELETE FROM chat_messages WHERE session_id = ?1", [&session_id]).map_err(|error| error.to_string())?;
+    transaction.execute("DELETE FROM agent_previews WHERE session_id = ?1", [&session_id]).map_err(|error| error.to_string())?;
+    let changed = transaction.execute("DELETE FROM chat_sessions WHERE id = ?1", [&session_id]).map_err(|error| error.to_string())?;
+    if changed == 0 { return Err("chat session not found".to_string()); }
+    transaction.commit().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -2175,7 +2223,7 @@ fn list_chat_messages(
         .map_err(|_| "project store lock poisoned".to_string())?;
     let connection = open_projects(&app)?;
     let mut statement = connection
-        .prepare("SELECT id, session_id, role, content, context_json, created_at FROM chat_messages WHERE session_id = ?1 ORDER BY created_at ASC")
+        .prepare("SELECT id, session_id, role, content, context_json, attachments_json, status, created_at FROM chat_messages WHERE session_id = ?1 ORDER BY created_at ASC")
         .map_err(|error| error.to_string())?;
     let rows = statement
         .query_map([session_id], row_to_chat_message)
@@ -2216,7 +2264,7 @@ async fn send_chat_message(
             return Err("chat session not found".to_string());
         }
         let mut statement = connection
-            .prepare("SELECT id, session_id, role, content, context_json, created_at FROM chat_messages WHERE session_id = ?1 ORDER BY created_at DESC LIMIT 24")
+            .prepare("SELECT id, session_id, role, content, context_json, attachments_json, status, created_at FROM chat_messages WHERE session_id = ?1 ORDER BY created_at DESC LIMIT 24")
             .map_err(|error| error.to_string())?;
         let mut history = statement
             .query_map([&session_id], row_to_chat_message)
@@ -2230,6 +2278,8 @@ async fn send_chat_message(
             role: "user".to_string(),
             content,
             context_json,
+            attachments_json: "[]".to_string(),
+            status: "complete".to_string(),
             created_at: Utc::now().to_rfc3339(),
         };
         insert_chat_message(&connection, &user_message)?;
@@ -2280,8 +2330,10 @@ async fn send_chat_message(
         role: "assistant".to_string(),
         content: chat_response_content(&value)
             .ok_or("chat response did not contain message content".to_string())?,
-        context_json: "{}".to_string(),
-        created_at: Utc::now().to_rfc3339(),
+            context_json: "{}".to_string(),
+            attachments_json: "[]".to_string(),
+            status: "complete".to_string(),
+            created_at: Utc::now().to_rfc3339(),
     };
     let _guard = lock
         .0
@@ -3945,6 +3997,8 @@ fn main() {
             import_project_from_file,
             list_chat_sessions,
             create_chat_session,
+            rename_chat_session,
+            delete_chat_session,
             list_chat_messages,
             send_chat_message,
             create_agent_preview,
