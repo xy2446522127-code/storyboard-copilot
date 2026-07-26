@@ -158,7 +158,9 @@ export function installImageStudio({ openApiSettings } = {}) {
       card.className = `huahai-image__job is-${job.status}`;
       const heading = document.createElement("div");
       const state = document.createElement("strong");
+      const progress = Number(job.progress);
       state.textContent = job.status === "succeeded" ? "已完成" : job.status === "failed" ? "失败" : "生成中";
+      if (job.status === "pending" && progress > 0) state.textContent += ` ${Math.min(100, Math.round(progress))}%`;
       const model = document.createElement("span");
       if (job.status === "cancelled") state.textContent = "已停止本地等待";
       model.textContent = job.modelLabel || "未标注模型";
@@ -215,7 +217,7 @@ export function installImageStudio({ openApiSettings } = {}) {
   const poll = async (job) => {
     try {
       const latest = await invoke("get_generate_image_job", { jobId: job.id });
-      job.status = latest.status; job.result = latest.result; job.error = latest.error; renderJobs();
+      job.status = latest.status; job.progress = latest.progress; job.result = latest.result; job.error = latest.error; renderJobs();
       if (latest.status === "pending") window.setTimeout(() => poll(job), 2200);
     } catch (error) { job.status = "failed"; job.error = String(error); renderJobs(); }
   };
@@ -231,7 +233,7 @@ export function installImageStudio({ openApiSettings } = {}) {
     } catch (error) { toast(`无法停止任务：${String(error)}`, "error"); }
   };
   const runJob = async ({ payload, prompt, modelLabel }) => {
-    const job = { id: "", status: "pending", prompt, modelLabel, result: "", error: "", payload };
+    const job = { id: "", status: "pending", progress: 0, prompt, modelLabel, result: "", error: "", payload };
     jobs.unshift(job); renderJobs();
     try {
       // Persisting a studio task returns immediately, so a slow provider never
@@ -253,6 +255,7 @@ export function installImageStudio({ openApiSettings } = {}) {
       return {
         id: job.jobId,
         status: job.status,
+        progress: job.progress || 0,
         prompt: metadata?.prompt || "已保存的生成任务",
         modelLabel: metadata?.model || job.providerId,
         result: job.result || "",
