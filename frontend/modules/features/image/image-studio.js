@@ -11,8 +11,10 @@ function readFile(file) {
   });
 }
 
-function dimensionsForRatio(value) {
-  return ({ "1:1": "1024x1024", "2:3": "1024x1536", "3:2": "1536x1024", "3:4": "1024x1365", "4:3": "1365x1024", "9:16": "1024x1792", "16:9": "1792x1024" })[value] || "1024x1024";
+function dimensionsForRatio(value, resolution = "1k") {
+  const scale = ({ "1k": 1, "2k": 1.5, "4k": 2 })[resolution] || 1;
+  const base = ({ "1:1": [1024, 1024], "2:3": [1024, 1536], "3:2": [1536, 1024], "3:4": [1024, 1365], "4:3": [1365, 1024], "9:16": [1024, 1792], "16:9": [1792, 1024] })[value] || [1024, 1024];
+  return `${Math.round(base[0] * scale / 64) * 64}x${Math.round(base[1] * scale / 64) * 64}`;
 }
 
 export function installImageStudio({ openApiSettings } = {}) {
@@ -71,6 +73,7 @@ export function installImageStudio({ openApiSettings } = {}) {
     }));
     if (!models.length) { const option = document.createElement("option"); option.value = ""; option.textContent = "请先配置图像模型"; modelsNode.append(option); }
     renderCapabilities();
+    await loadJobs();
   };
   const renderJobs = () => {
     jobsNode.replaceChildren(...jobs.map((job) => {
@@ -100,6 +103,12 @@ export function installImageStudio({ openApiSettings } = {}) {
       if (latest.status === "pending") window.setTimeout(() => poll(job), 2200);
     } catch (error) { job.status = "failed"; job.error = String(error); renderJobs(); }
   };
+  const loadJobs = async () => {
+    const stored = await invoke("list_generate_image_jobs");
+    jobs = stored.map((job) => ({ id: job.jobId, status: job.status, prompt: "已保存的生成任务", modelLabel: job.providerId, result: job.result || "", error: job.error || "" }));
+    renderJobs();
+    jobs.filter((job) => job.status === "pending").forEach((job) => poll(job));
+  };
   const submit = async () => {
     const model = selectedModel();
     const prompt = safeText(field("prompt").value);
@@ -114,7 +123,8 @@ export function installImageStudio({ openApiSettings } = {}) {
     jobs.unshift(job); renderJobs();
     try {
       const references = (supports("multiReference") ? refs : refs.slice(0, 1)).map((ref) => ({ image_url: ref.dataUrl }));
-      const payload = { provider_id: model.providerId, model: model.id, prompt, negative_prompt: supports("negativePrompt") ? safeText(field("negative").value) : undefined, size: field("resolution").value === "custom" ? dimensionsForRatio(field("ratio").value) : dimensionsForRatio(field("ratio").value), quality: field("resolution").value, n: count, seed: supports("seed") && field("seed").value ? Number(field("seed").value) : undefined, reference_images: references };
+      const resolution = field("resolution").value;
+      const payload = { provider_id: model.providerId, model: model.id, prompt, negative_prompt: supports("negativePrompt") ? safeText(field("negative").value) : undefined, size: dimensionsForRatio(field("ratio").value, resolution), quality: resolution, n: count, seed: supports("seed") && field("seed").value ? Number(field("seed").value) : undefined, reference_images: references };
       job.id = await invoke("submit_generate_image_job", { payload: JSON.stringify(payload) });
       await poll(job);
     } catch (error) { job.status = "failed"; job.error = String(error); renderJobs(); }

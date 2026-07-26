@@ -4400,6 +4400,29 @@ async fn submit_generate_image_job(
 }
 
 #[tauri::command]
+fn list_generate_image_jobs(
+    app: AppHandle,
+    lock: State<StoreLock>,
+) -> Result<Vec<GenerationJob>, String> {
+    let _guard = lock
+        .0
+        .lock()
+        .map_err(|_| "generation job lock poisoned".to_string())?;
+    let connection = open_projects(&app)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT job_id, provider_id, kind, status, progress, result, error, remote_job_id, updated_at
+             FROM generation_jobs WHERE kind = 'image' ORDER BY updated_at DESC LIMIT 50",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], row_to_generation_job)
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn get_generate_image_job(
     app: AppHandle,
     job_id: String,
@@ -4936,6 +4959,7 @@ fn main() {
             jimeng_browser_generate,
             jimeng_submit_video,
             submit_generate_image_job,
+            list_generate_image_jobs,
             get_generate_image_job,
             generate_image,
             generate_tts,
