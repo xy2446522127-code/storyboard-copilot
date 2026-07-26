@@ -20,6 +20,53 @@ function extractActionPreview(content) {
   try { return Array.isArray(JSON.parse(match[1])) ? match[1] : null; } catch { return null; }
 }
 
+function summarizeAgentActions(actionsJson) {
+  try {
+    const actions = JSON.parse(actionsJson);
+    if (!Array.isArray(actions) || !actions.length) return null;
+    let affected = 0;
+    let paid = false;
+    let manualOnly = false;
+    const items = actions.map((action) => {
+      const params = action?.params || {};
+      switch (action?.type) {
+        case "createNodes": {
+          const count = Array.isArray(params.nodes) ? params.nodes.length : 0;
+          affected += count;
+          return `创建 ${count} 个节点`;
+        }
+        case "deleteNodes": {
+          const count = Array.isArray(params.ids) ? params.ids.length : 0;
+          affected += count;
+          return `删除 ${count} 个节点（可从画布历史撤销）`;
+        }
+        case "updatePrompts": {
+          const count = Array.isArray(params.items) ? params.items.length : 0;
+          affected += count;
+          return `修改 ${count} 个提示词`;
+        }
+        case "arrangeNodes": {
+          const count = Array.isArray(params.ids) ? params.ids.length : 0;
+          affected += count;
+          return `排列 ${count} 个节点`;
+        }
+        case "generateImage":
+        case "generateVideo":
+          paid = true;
+          manualOnly = true;
+          return action.type === "generateImage" ? "发起生图（可能收费，需到生图工作台再次确认）" : "发起生视频（可能收费，需到生成节点再次确认）";
+        case "connectImagesToVideo":
+          manualOnly = true;
+          return "批量连接图片到视频（需在画布工具栏选择目标节点）";
+        default:
+          manualOnly = true;
+          return `未识别的操作：${String(action?.type || "未知")}`;
+      }
+    });
+    return { items, affected, paid, manualOnly };
+  } catch { return null; }
+}
+
 export function installChatPanel({ openApiSettings } = {}) {
   const panel = document.createElement("section");
   panel.id = "huahai-chat-panel";
@@ -141,16 +188,38 @@ export function installChatPanel({ openApiSettings } = {}) {
   const appendActionPreview = (messageNode, content) => {
     const actionsJson = extractActionPreview(content);
     if (!actionsJson) return;
+    const summary = summarizeAgentActions(actionsJson);
+    if (!summary) return;
     const preview = document.createElement("div");
     preview.className = "huahai-chat__preview";
-    preview.innerHTML = "<span>检测到画布操作建议；执行前必须确认。</span><button type=\"button\">创建预览</button>";
-    preview.querySelector("button").addEventListener("click", async () => {
+    const title = document.createElement("strong");
+    title.textContent = "画布操作预览";
+    const scope = document.createElement("p");
+    scope.textContent = `预计影响 ${summary.affected} 个节点；${summary.paid ? "包含可能收费的操作。" : "安全操作会写入可撤销历史。"}`;
+    const list = document.createElement("ul");
+    summary.items.forEach((item) => { const row = document.createElement("li"); row.textContent = item; list.append(row); });
+    const note = document.createElement("p");
+    note.className = "huahai-chat__preview-note";
+    note.textContent = summary.manualOnly
+      ? "含需人工二次确认的操作；聊天不会自动扣费、生成媒体或选择视频目标。"
+      : "确认后将由本地白名单执行，随后刷新画布；可通过画布历史撤销。";
+    const confirm = document.createElement("button");
+    confirm.type = "button";
+    confirm.textContent = summary.manualOnly ? "保存并确认预览" : "确认并执行";
+    preview.append(title, scope, list, note, confirm);
+    confirm.addEventListener("click", async () => {
       try {
         const stored = await invoke("create_agent_preview", { sessionId: session.id, projectId, actionsJson });
-        const approved = window.confirm("确认后将立即执行预览中的安全本地操作。付费生成和多图连到视频仍不会自动执行，必须从对应工作台再次确认。是否继续？");
+        const approved = window.confirm(summary.manualOnly
+          ? "此预览含需人工二次确认的操作。确认后只保存审核记录，不会自动扣费、生成或连线。是否继续？"
+          : "确认后将立即执行预览中的安全本地操作，并可从画布历史撤销。是否继续？");
         await invoke("resolve_agent_preview", { previewId: stored.id, confirm: approved });
         if (!approved) {
           toast("操作预览已拒绝。", "info");
+          return;
+        }
+        if (summary.manualOnly) {
+          toast("操作预览已确认；请在对应的生图、生视频或批量连接工具中完成二次确认。", "info");
           return;
         }
         // The Rust executor accepts only the structured whitelist. It refuses
