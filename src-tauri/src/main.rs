@@ -4753,47 +4753,62 @@ fn append_image_source_to_canvas(
     // HTTPS result URL remains a controlled reference and is intentionally not
     // downloaded here, so this action creates no unexpected network request.
     let image_path = persist_media_source(&app, "images", source)?;
-    let (width, height) = if PathBuf::from(&image_path).is_file() {
-        let decoded = image::open(&image_path)
-            .map_err(|error| format!("cannot read generated image: {error}"))?;
-        decoded.dimensions()
-    } else {
-        (1024, 1024)
-    };
-    let (rightmost, lowest) = nodes
-        .iter()
-        .fold((40.0_f64, 40.0_f64), |(right, low), node| {
-            let (x, y) = node_position(node);
-            (right.max(x), low.max(y))
-        });
-    nodes.push(serde_json::json!({
-        "id": format!("upload-{}", Uuid::new_v4()),
-        "type": "uploadNode",
-        "position": {"x": rightmost + 96.0, "y": lowest + 96.0},
-        "data": {
-            "displayName": file_name,
-            "imageUrl": image_path,
-            "previewImageUrl": image_path,
-            "aspectRatio": "1:1",
-            "isSizeManuallyAdjusted": true,
-            "sourceFileName": "online-image-result",
-            "imageWidth": width,
-            "imageHeight": height
+    // Only locally persisted sources create a new file.  If the subsequent image
+    // inspection or database transaction fails, remove that file again rather than
+    // leaving a media entry that no canvas node can reach.
+    let persisted_media = PathBuf::from(&image_path);
+    let cleanup_path = persisted_media.is_file().then_some(persisted_media);
+    let result = (|| -> Result<ProjectRecord, String> {
+        let (width, height) = if PathBuf::from(&image_path).is_file() {
+            let decoded = image::open(&image_path)
+                .map_err(|error| format!("cannot read generated image: {error}"))?;
+            decoded.dimensions()
+        } else {
+            (1024, 1024)
+        };
+        let (rightmost, lowest) = nodes
+            .iter()
+            .fold((40.0_f64, 40.0_f64), |(right, low), node| {
+                let (x, y) = node_position(node);
+                (right.max(x), low.max(y))
+            });
+        nodes.push(serde_json::json!({
+            "id": format!("upload-{}", Uuid::new_v4()),
+            "type": "uploadNode",
+            "position": {"x": rightmost + 96.0, "y": lowest + 96.0},
+            "data": {
+                "displayName": file_name,
+                "imageUrl": image_path,
+                "previewImageUrl": image_path,
+                "aspectRatio": "1:1",
+                "isSizeManuallyAdjusted": true,
+                "sourceFileName": "online-image-result",
+                "imageWidth": width,
+                "imageHeight": height
+            }
+        }));
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        let updated = write_project_canvas(&transaction, &project, &nodes, &edges)?;
+        record_canvas_batch_history(
+            &transaction,
+            &project_id,
+            "online-image-result",
+            &before_nodes,
+            &before_edges,
+            &nodes,
+            &edges,
+        )?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(updated)
+    })();
+    if result.is_err() {
+        if let Some(path) = cleanup_path {
+            let _ = fs::remove_file(path);
         }
-    }));
-    let transaction = connection.transaction().map_err(|error| error.to_string())?;
-    let updated = write_project_canvas(&transaction, &project, &nodes, &edges)?;
-    record_canvas_batch_history(
-        &transaction,
-        &project_id,
-        "online-image-result",
-        &before_nodes,
-        &before_edges,
-        &nodes,
-        &edges,
-    )?;
-    transaction.commit().map_err(|error| error.to_string())?;
-    Ok(updated)
+    }
+    result
 }
 
 #[tauri::command]
