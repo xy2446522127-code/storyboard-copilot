@@ -1,15 +1,1 @@
-#huahai-update-button {
-  position: fixed;
-  right: 20px;
-  bottom: 20px;
-  z-index: 2147483646;
-  padding: 8px 12px;
-  border: 1px solid rgba(255, 255, 255, .22);
-  border-radius: 999px;
-  color: #fff;
-  background: #172033;
-  box-shadow: 0 5px 18px rgba(0, 0, 0, .28);
-  cursor: pointer;
-}
-
-#huahai-update-button.is-available { background: #0f766e; }
+/* The update control intentionally lives beside the sidebar version label. */

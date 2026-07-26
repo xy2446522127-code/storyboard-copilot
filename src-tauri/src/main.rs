@@ -18,6 +18,8 @@ use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowB
 use tauri_plugin_updater::UpdaterExt;
 use uuid::Uuid;
 
+const PROJECT_HOMEPAGE: &str = "https://github.com/xy2446522127-code/storyboard-copilot";
+
 #[derive(Default)]
 struct StoreLock(Mutex<()>);
 
@@ -3728,6 +3730,17 @@ fn app_version() -> &'static str {
 }
 
 #[tauri::command]
+fn open_project_homepage() -> Result<(), String> {
+    // Explorer delegates HTTPS URLs to the user's configured default browser.  The
+    // target is a fixed project URL, never user-supplied command input.
+    Command::new("explorer.exe")
+        .arg(PROJECT_HOMEPAGE)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("无法打开项目主页：{error}"))
+}
+
+#[tauri::command]
 fn minimize_window(window: WebviewWindow) -> Result<(), String> {
     window.minimize().map_err(|error| error.to_string())
 }
@@ -3881,6 +3894,7 @@ fn main() {
             check_for_update,
             install_available_update,
             app_version,
+            open_project_homepage,
             minimize_window,
             toggle_maximize_window,
             close_window,

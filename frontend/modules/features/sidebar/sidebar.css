@@ -1,12 +1,3 @@
-#huahai-sidebar-hotzone {
-  position: fixed;
-  top: 0;
-  left: 0;
-  z-index: var(--hh-z-sidebar);
-  width: 14px;
-  height: 100vh;
-}
-
 #huahai-sidebar {
   position: fixed;
   inset: 0 auto 0 0;
@@ -87,7 +78,10 @@ body.huahai-sidebar-open #huahai-sidebar { transform: translateX(0); }
 
 .huahai-sidebar__spacer { flex: 1; min-height: 22px; }
 .huahai-sidebar__bottom { display: grid; gap: 4px; padding: 10px 0; border-top: 1px solid var(--hh-border); }
-.huahai-sidebar__version { padding: 7px 12px 0; color: #65748c; font-size: 11px; text-align: center; }
+.huahai-sidebar__version-row { display:flex; align-items:center; justify-content:space-between; gap:6px; padding:7px 6px 0; }
+.huahai-sidebar__version { color: #65748c; font-size: 11px; white-space:nowrap; }
+.huahai-sidebar__update { min-height:28px!important; width:auto!important; padding:0 8px!important; border:1px solid var(--hh-border)!important; color:var(--hh-muted)!important; font-size:11px; white-space:nowrap; }
+.huahai-sidebar__update.is-available { color:#fff!important; background:#0f766e!important; border-color:#34d399!important; }
 
 @media (max-width: 900px) {
   #huahai-sidebar { width: min(264px, 86vw); }
