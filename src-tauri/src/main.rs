@@ -171,7 +171,7 @@ mod tests {
         };
         cancel_background_image_job_record(&mut job);
         assert_eq!(job.status, "cancelled");
-        assert!(job.error.as_deref().unwrap_or_default().contains("remote"));
+        assert!(job.error.as_deref().unwrap_or_default().contains("远端"));
         assert!(!job.updated_at.is_empty());
     }
 
@@ -4926,7 +4926,7 @@ fn save_background_image_job(app: &AppHandle, job: &GenerationJob) {
 fn cancel_background_image_job_record(job: &mut GenerationJob) {
     job.status = "cancelled".to_string();
     job.error = Some(
-        "Stopped local waiting. A request already accepted by the provider may still continue remotely."
+        "已停止本地等待。若服务商已接收请求，远端仍可能继续处理并产生费用。"
             .to_string(),
     );
     job.updated_at = Utc::now().to_rfc3339();
@@ -4947,7 +4947,7 @@ async fn run_background_image_job(
         Ok(client) => client,
         Err(error) => {
             job.status = "failed".to_string();
-            job.error = Some(format!("Could not prepare image request: {error}"));
+            job.error = Some(format!("无法准备生图请求：{error}"));
             job.updated_at = Utc::now().to_rfc3339();
             save_background_image_job(&app, &job);
             return;
@@ -4977,7 +4977,7 @@ async fn run_background_image_job(
                 // Never store provider bodies.  Proxies can echo request headers,
                 // while the HTTP status is the useful and safe recovery signal.
                 job.status = "failed".to_string();
-                job.error = Some(format!("Image generation request failed ({status})"));
+                job.error = Some(format!("生图请求失败（{status}）"));
             } else {
                 match response.json::<serde_json::Value>().await {
                     Ok(_value) if cancel.is_cancelled() => cancel_background_image_job_record(&mut job),
@@ -4999,20 +4999,20 @@ async fn run_background_image_job(
                             }
                             Err(error) => {
                                 job.status = "failed".to_string();
-                                job.error = Some(format!("Could not save generated image: {error}"));
+                                job.error = Some(format!("无法保存生成图片：{error}"));
                             }
                         }
                     }
                     Err(error) => {
                         job.status = "failed".to_string();
-                        job.error = Some(format!("Image provider returned invalid JSON: {error}"));
+                        job.error = Some(format!("图像服务返回了无效数据：{error}"));
                     }
                 }
             }
         }
         Some(Err(error)) => {
             job.status = "failed".to_string();
-            job.error = Some(format!("Image generation request failed: {error}"));
+            job.error = Some(format!("生图请求失败：{error}"));
         }
     }
     job.updated_at = Utc::now().to_rfc3339();
@@ -5146,7 +5146,7 @@ fn list_generate_image_jobs(
         {
             job.status = "failed".to_string();
             job.error = Some(
-                "The app was closed before the provider returned a task ID. Reuse the parameters to try again."
+                "应用在服务商返回任务编号前已关闭。请复用参数后重试。"
                     .to_string(),
             );
             job.updated_at = Utc::now().to_rfc3339();
