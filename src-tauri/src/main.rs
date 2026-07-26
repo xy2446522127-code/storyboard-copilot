@@ -5235,7 +5235,15 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let webview_data = PathBuf::from(r"F:\Huahaihuabu\花海画布\webview");
+            let runtime_temp = PathBuf::from(r"F:\Huahaihuabu\花海画布\update-tmp");
             fs::create_dir_all(&webview_data)?;
+            fs::create_dir_all(&runtime_temp)?;
+            // Tauri's updater and its HTTP stack may create temporary files. Set
+            // the process-level Windows temp variables before any updater action
+            // so update downloads never fall back to the user's C: profile.
+            std::env::set_var("TEMP", &runtime_temp);
+            std::env::set_var("TMP", &runtime_temp);
+            std::env::set_var("TMPDIR", &runtime_temp);
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("花海画布")
                 .inner_size(1280.0, 800.0)
