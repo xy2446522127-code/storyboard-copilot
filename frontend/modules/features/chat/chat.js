@@ -269,14 +269,15 @@ export function installChatPanel({ openApiSettings } = {}) {
   const streamReply = async (requestId, pending) => {
     let sequence = 0;
     let answer = "";
-    while (activeRequestId === requestId) {
-      const status = await invoke("poll_chat_stream", { requestId, afterSequence: sequence });
-      for (const event of status.events || []) {
-        sequence = Math.max(sequence, event.sequence || 0);
-        answer += event.delta || "";
-      }
-      if (answer) pending.textContent = answer;
-      if (status.status === "completed") {
+    try {
+      while (activeRequestId === requestId) {
+        const status = await invoke("poll_chat_stream", { requestId, afterSequence: sequence });
+        for (const event of status.events || []) {
+          sequence = Math.max(sequence, event.sequence || 0);
+          answer += event.delta || "";
+        }
+        if (answer) pending.textContent = answer;
+        if (status.status === "completed") {
         pending.className = "huahai-chat__message huahai-chat__message--assistant";
         pending.replaceChildren();
         const content = document.createElement("div");
@@ -292,22 +293,26 @@ export function installChatPanel({ openApiSettings } = {}) {
         });
         pending.append(content, copy);
         appendActionPreview(pending, answer);
-        activeRequestId = null;
-        await loadSessions();
-        return;
+          activeRequestId = null;
+          await loadSessions();
+          return;
+        }
+        if (status.status === "cancelled") {
+          pending.remove();
+          activeRequestId = null;
+          toast("已停止生成；半截助手回答不会保存。", "info");
+          return;
+        }
+        if (status.status === "failed") {
+          pending.textContent = `对话失败：${status.error || "未知错误"}`;
+          activeRequestId = null;
+          return;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 180));
       }
-      if (status.status === "cancelled") {
-        pending.remove();
-        activeRequestId = null;
-        toast("已停止生成；半截助手回答不会保存。", "info");
-        return;
-      }
-      if (status.status === "failed") {
-        pending.textContent = `对话失败：${status.error || "未知错误"}`;
-        activeRequestId = null;
-        return;
-      }
-      await new Promise((resolve) => window.setTimeout(resolve, 180));
+    } catch (error) {
+      if (activeRequestId === requestId) activeRequestId = null;
+      pending.textContent = `无法获取对话状态：${String(error)}`;
     }
   };
   const send = async (text = messageInput.value) => {

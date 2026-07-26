@@ -2848,13 +2848,22 @@ async fn send_chat_message(
             status: "complete".to_string(),
             created_at: Utc::now().to_rfc3339(),
         };
-        insert_chat_message(&connection, &user_message)?;
         (history, user_message)
     };
 
     let (base_url, api_key) = provider_credentials(&app, &provider_id)?;
     let endpoint = provider_endpoint(&base_url, "chat/completions")?;
     let messages = chat_api_messages(&app, &history, &user_message, None, false)?;
+    // Do not create a local turn until all local preparation has succeeded.
+    // In particular, malformed settings or a media reference that disappears
+    // between selection and send must not leave an unsent orphan in history.
+    {
+        let _guard = lock
+            .0
+            .lock()
+            .map_err(|_| "project store lock poisoned".to_string())?;
+        insert_chat_message(&open_projects(&app)?, &user_message)?;
+    }
     let response = Client::new()
         .post(endpoint)
         .bearer_auth(api_key)
@@ -2960,10 +2969,19 @@ fn start_chat_stream(
             status: "complete".to_string(),
             created_at: Utc::now().to_rfc3339(),
         };
-        insert_chat_message(&connection, &user_message)?;
         (history, user_message)
     };
     let messages = chat_api_messages(&app, &history, &user_message, system_prompt, send_originals)?;
+    // Persist only after attachment/original-media preparation succeeds.  This
+    // keeps an inaccessible or over-limit attachment from becoming a visible
+    // user message that was never submitted to a provider.
+    {
+        let _guard = lock
+            .0
+            .lock()
+            .map_err(|_| "project store lock poisoned".to_string())?;
+        insert_chat_message(&open_projects(&app)?, &user_message)?;
+    }
     let request_id = Uuid::new_v4().to_string();
     let cancel = CancellationToken::new();
     let mut records = streams
