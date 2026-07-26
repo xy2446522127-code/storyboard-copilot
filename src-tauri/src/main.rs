@@ -117,6 +117,40 @@ mod tests {
         let event = serde_json::json!({"choices":[{"delta":{"content":"hello"}}]});
         assert_eq!(chat_stream_delta(&event).as_deref(), Some("hello"));
     }
+
+    #[test]
+    fn connected_arrangement_respects_edges_and_keeps_sibling_order_stable() {
+        let stable = vec![
+            "image-b".to_string(),
+            "image-a".to_string(),
+            "image-c".to_string(),
+        ];
+        let edges = vec![
+            serde_json::json!({"source":"image-a","target":"image-c"}),
+            serde_json::json!({"source":"image-b","target":"image-c"}),
+        ];
+        assert_eq!(
+            order_connected_image_ids(&stable, &edges),
+            vec!["image-b", "image-a", "image-c"]
+        );
+    }
+
+    #[test]
+    fn connected_arrangement_keeps_cycles_in_spatial_fallback_order() {
+        let stable = vec![
+            "image-c".to_string(),
+            "image-a".to_string(),
+            "image-b".to_string(),
+        ];
+        let edges = vec![
+            serde_json::json!({"source":"image-a","target":"image-b"}),
+            serde_json::json!({"source":"image-b","target":"image-a"}),
+        ];
+        assert_eq!(
+            order_connected_image_ids(&stable, &edges),
+            vec!["image-c", "image-a", "image-b"]
+        );
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3315,6 +3349,64 @@ fn preview_canvas_batch_action(
     })
 }
 
+/// Keeps a deterministic spatial order while respecting directed connections between
+/// the selected image nodes. Cycles deliberately fall back to their original order:
+/// a cyclic graph has no unambiguous start node and must never cause a canvas action
+/// to fail or randomly reshuffle user work.
+fn order_connected_image_ids(stable: &[String], edges: &[serde_json::Value]) -> Vec<String> {
+    let selected: HashSet<&str> = stable.iter().map(String::as_str).collect();
+    let mut incoming: HashMap<&str, usize> = stable.iter().map(|id| (id.as_str(), 0)).collect();
+    let mut outgoing: HashMap<&str, Vec<&str>> =
+        stable.iter().map(|id| (id.as_str(), Vec::new())).collect();
+    for edge in edges {
+        let source = edge.get("source").and_then(serde_json::Value::as_str);
+        let target = edge.get("target").and_then(serde_json::Value::as_str);
+        if let (Some(source), Some(target)) = (source, target) {
+            if selected.contains(source) && selected.contains(target) && source != target {
+                outgoing.entry(source).or_default().push(target);
+                *incoming.entry(target).or_default() += 1;
+            }
+        }
+    }
+    let stable_index: HashMap<&str, usize> = stable
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (id.as_str(), index))
+        .collect();
+    let mut ready = stable
+        .iter()
+        .map(String::as_str)
+        .filter(|id| incoming.get(id).copied().unwrap_or(0) == 0)
+        .collect::<Vec<_>>();
+    ready.sort_by_key(|id| stable_index.get(id).copied().unwrap_or(usize::MAX));
+    let mut ordered = Vec::with_capacity(stable.len());
+    while let Some(id) = ready.first().copied() {
+        ready.remove(0);
+        if ordered.contains(&id) {
+            continue;
+        }
+        ordered.push(id);
+        let mut next = outgoing.get(id).cloned().unwrap_or_default();
+        next.sort_by_key(|child| stable_index.get(child).copied().unwrap_or(usize::MAX));
+        for child in next {
+            let degree = incoming.entry(child).or_default();
+            *degree = degree.saturating_sub(1);
+            if *degree == 0 {
+                ready.push(child);
+            }
+        }
+        ready.sort_by_key(|candidate| stable_index.get(candidate).copied().unwrap_or(usize::MAX));
+    }
+    // Cycles and disconnected nodes retain their spatially stable fallback order.
+    let remaining = stable
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !ordered.contains(id))
+        .collect::<Vec<_>>();
+    ordered.extend(remaining);
+    ordered.into_iter().map(ToOwned::to_owned).collect()
+}
+
 #[tauri::command]
 fn apply_canvas_batch_action(
     app: AppHandle,
@@ -3365,60 +3457,7 @@ fn apply_canvas_batch_action(
         primary.then(secondary).then(left.cmp(right))
     });
     if action == "arrange-connected" {
-        let stable = image_ids.clone();
-        let selected: HashSet<&str> = stable.iter().map(String::as_str).collect();
-        let mut incoming: HashMap<&str, usize> = stable.iter().map(|id| (id.as_str(), 0)).collect();
-        let mut outgoing: HashMap<&str, Vec<&str>> =
-            stable.iter().map(|id| (id.as_str(), Vec::new())).collect();
-        for edge in &edges {
-            let source = edge.get("source").and_then(serde_json::Value::as_str);
-            let target = edge.get("target").and_then(serde_json::Value::as_str);
-            if let (Some(source), Some(target)) = (source, target) {
-                if selected.contains(source) && selected.contains(target) && source != target {
-                    outgoing.entry(source).or_default().push(target);
-                    *incoming.entry(target).or_default() += 1;
-                }
-            }
-        }
-        let stable_index: HashMap<&str, usize> = stable
-            .iter()
-            .enumerate()
-            .map(|(index, id)| (id.as_str(), index))
-            .collect();
-        let mut ready = stable
-            .iter()
-            .map(String::as_str)
-            .filter(|id| incoming.get(id).copied().unwrap_or(0) == 0)
-            .collect::<Vec<_>>();
-        ready.sort_by_key(|id| stable_index.get(id).copied().unwrap_or(usize::MAX));
-        let mut ordered = Vec::with_capacity(stable.len());
-        while let Some(id) = ready.first().copied() {
-            ready.remove(0);
-            if ordered.contains(&id) {
-                continue;
-            }
-            ordered.push(id);
-            let mut next = outgoing.get(id).cloned().unwrap_or_default();
-            next.sort_by_key(|child| stable_index.get(child).copied().unwrap_or(usize::MAX));
-            for child in next {
-                let degree = incoming.entry(child).or_default();
-                *degree = degree.saturating_sub(1);
-                if *degree == 0 {
-                    ready.push(child);
-                }
-            }
-            ready.sort_by_key(|candidate| {
-                stable_index.get(candidate).copied().unwrap_or(usize::MAX)
-            });
-        }
-        // Cycles and disconnected nodes retain the spatially stable fallback order.
-        let remaining = stable
-            .iter()
-            .map(String::as_str)
-            .filter(|id| !ordered.contains(id))
-            .collect::<Vec<_>>();
-        ordered.extend(remaining);
-        image_ids = ordered.into_iter().map(ToOwned::to_owned).collect();
+        image_ids = order_connected_image_ids(&image_ids, &edges);
     }
 
     match action.as_str() {
