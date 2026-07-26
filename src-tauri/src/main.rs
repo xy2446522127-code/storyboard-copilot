@@ -147,6 +147,15 @@ mod tests {
     }
 
     #[test]
+    fn model_connection_probe_counts_openai_model_arrays() {
+        assert_eq!(
+            remote_model_count(&serde_json::json!({"data":[{"id":"one"},{"id":"two"}]})),
+            2
+        );
+        assert_eq!(remote_model_count(&serde_json::json!({"models":[]})), 0);
+    }
+
+    #[test]
     fn connected_arrangement_respects_edges_and_keeps_sibling_order_stable() {
         let stable = vec![
             "image-b".to_string(),
@@ -417,6 +426,14 @@ fn image_result_from_response(value: &serde_json::Value) -> Option<String> {
     item.get("b64_json")
         .and_then(serde_json::Value::as_str)
         .map(|encoded| format!("data:image/png;base64,{encoded}"))
+}
+
+fn remote_model_count(value: &serde_json::Value) -> usize {
+    value
+        .get("data")
+        .or_else(|| value.get("models"))
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len)
 }
 
 /// Generation providers commonly return either a temporary HTTPS URL or an
@@ -4396,6 +4413,39 @@ async fn list_remote_models(base_url: String, api_key: String) -> Result<Vec<Str
     Ok(models)
 }
 
+/// Tests an already-saved provider without returning its base URL or key to the
+/// WebView.  `/models` is a cheap OpenAI-compatible capability probe and avoids
+/// any paid generation request.
+#[tauri::command]
+async fn test_api_provider_connection(
+    app: AppHandle,
+    provider_id: String,
+) -> Result<usize, String> {
+    let (base_url, api_key) = provider_credentials(&app, &provider_id)?;
+    let endpoint = models_endpoint(&base_url)?;
+    let response = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| format!("无法创建连接测试客户端: {error}"))?
+        .get(endpoint)
+        .bearer_auth(api_key)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|error| format!("连接失败: {error}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("读取连接测试响应失败: {error}"))?;
+    if !status.is_success() {
+        return Err(format!("连接测试失败 ({status})"));
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(&body).map_err(|error| format!("模型响应不是 JSON: {error}"))?;
+    Ok(remote_model_count(&value))
+}
+
 #[tauri::command]
 async fn auth_login(
     app: AppHandle,
@@ -5320,6 +5370,7 @@ fn main() {
             save_api_model_catalog,
             list_configured_models,
             list_remote_models,
+            test_api_provider_connection,
             auth_login,
             auth_register,
             auth_logout,

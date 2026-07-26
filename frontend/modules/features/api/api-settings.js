@@ -73,7 +73,7 @@ export function installApiSettings() {
           <div class="huahai-api__model-label"><span>模型列表</span><button type="button" data-action="fetch-models">拉取模型</button></div>
           <textarea data-field="models" required rows="4" placeholder="一个或多个模型，使用逗号或换行分隔"></textarea>
           <fieldset data-capabilities><legend>模型能力</legend></fieldset>
-          <div class="huahai-api__actions"><button type="button" data-action="new">新建</button><button type="submit" class="primary">保存此分类</button></div>
+          <div class="huahai-api__actions"><button type="button" data-action="new">新建</button><button type="button" data-action="test-connection">测试连接</button><button type="submit" class="primary">保存此分类</button></div>
         </form>
       </div>
     </div>`;
@@ -152,6 +152,16 @@ export function installApiSettings() {
         field("models").value = models.join("\n");
         toast(`已获取 ${models.length} 个模型。`, "success");
       } catch (error) { toast(`获取模型失败：${String(error)}`, "error"); }
+    }
+    if (action === "test-connection") {
+      const providerId = safeText(field("id").value);
+      if (!providerId || !selectedProviderId || providerId !== selectedProviderId) {
+        return toast("请先保存此服务和密钥，再测试连接。", "info");
+      }
+      try {
+        const count = await invoke("test_api_provider_connection", { providerId });
+        toast(count ? `连接成功，服务返回 ${count} 个模型。` : "连接成功；服务未返回模型列表。", "success");
+      } catch (error) { toast(`连接测试失败：${String(error)}`, "error"); }
     }
   });
   panel.querySelector(".huahai-api__tabs").addEventListener("click", (event) => {
