@@ -6,6 +6,7 @@ import { installImageStudio } from "./features/image/image-studio.js";
 import { installChatPanel } from "./features/chat/chat.js";
 import { installCanvasBatchTools } from "./features/canvas/batch-tools.js";
 import { installBlankCanvasImageDrop } from "./features/canvas/blank-image-drop.js";
+import { installAssetDropImport } from "./features/assets/asset-drop-import.js";
 import { installAnnouncements } from "./features/announcements/announcements.js";
 import { installMediaPerformance } from "./features/performance/media-performance.js";
 import { installUpdateButton } from "./features/update/update.js";
@@ -28,6 +29,7 @@ function boot() {
   const chat = optional("创作助手", () => installChatPanel({ openApiSettings: () => apiSettings.open() }), { open: () => {} });
   optional("侧栏", () => installSidebar({ openChat: () => chat.open(), openAnnouncements: () => announcements.open(), openApiSettings: () => apiSettings.open(), openImageStudio: () => imageStudio.open() }));
   optional("空白画布拖图", installBlankCanvasImageDrop);
+  optional("素材库拖入", installAssetDropImport);
   optional("批量画布工具", installCanvasBatchTools);
   optional("媒体性能优化", installMediaPerformance);
   optional("更新检查", installUpdateButton);

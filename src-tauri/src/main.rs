@@ -479,6 +479,16 @@ struct AssetRecord {
     updated_at: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AssetImportInput {
+    source: String,
+    file_name: String,
+    category: String,
+    #[serde(default)]
+    tags: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GenerationJob {
@@ -2124,6 +2134,68 @@ fn persist_video_binary(
 #[tauri::command]
 fn persist_audio_source(app: AppHandle, source: String) -> Result<String, String> {
     persist_media_source(&app, "audio", source)
+}
+
+fn normalized_asset_category(value: &str) -> Result<&'static str, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "image" | "images" => Ok("images"),
+        "video" | "videos" => Ok("videos"),
+        "audio" => Ok("audio"),
+        "document" | "documents" | "file" | "files" => Ok("documents"),
+        _ => Err("unsupported asset category".to_string()),
+    }
+}
+
+#[tauri::command]
+fn import_asset_file(
+    app: AppHandle,
+    input: AssetImportInput,
+    lock: State<StoreLock>,
+) -> Result<AssetRecord, String> {
+    if input.file_name.trim().is_empty() || input.file_name.chars().count() > 240 {
+        return Err("asset file name is invalid".to_string());
+    }
+    let category = normalized_asset_category(&input.category)?;
+    let mut path = persist_media_source(&app, category, input.source)?;
+    let mut persisted = PathBuf::from(&path);
+    let requested_extension = input.file_name.rsplit_once('.').map(|(_, extension)| extension).unwrap_or("bin");
+    let extension = normalized_extension(requested_extension, "bin");
+    if persisted.extension().and_then(|value| value.to_str()) != Some(extension.as_str()) {
+        let renamed = media_dir(&app, category)?.join(format!("{}.{}", Uuid::new_v4(), extension));
+        fs::rename(&persisted, &renamed).map_err(|error| error.to_string())?;
+        persisted = renamed;
+        path = persisted.display().to_string();
+    }
+    if !persisted.starts_with(app_dir(&app)?.join("media")) || !persisted.is_file() {
+        return Err("asset import did not create an F-drive local file".to_string());
+    }
+    let size = fs::metadata(&persisted).map_err(|error| error.to_string())?.len();
+    if size > 300 * 1024 * 1024 {
+        let _ = fs::remove_file(&persisted);
+        return Err("each imported file must be at most 300 MB".to_string());
+    }
+    let _guard = lock.0.lock().map_err(|_| "asset store lock poisoned".to_string())?;
+    let now = Utc::now().to_rfc3339();
+    let asset = AssetRecord {
+        id: Uuid::new_v4().to_string(),
+        name: safe_file_name(&input.file_name, "bin"),
+        category: category.to_string(),
+        tags: input.tags.chars().take(800).collect(),
+        file_path: path,
+        source_type: "local-import".to_string(),
+        source_node_id: None,
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    let result = open_projects(&app)?.execute(
+        "INSERT INTO assets (id, name, category, tags, file_path, source_type, source_node_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![&asset.id, &asset.name, &asset.category, &asset.tags, &asset.file_path, &asset.source_type, &asset.source_node_id, &asset.created_at, &asset.updated_at],
+    ).map_err(|error| error.to_string());
+    if let Err(error) = result {
+        let _ = fs::remove_file(&persisted);
+        return Err(error);
+    }
+    Ok(asset)
 }
 
 #[tauri::command]
@@ -6548,6 +6620,7 @@ fn main() {
             persist_video_source,
             persist_video_binary,
             persist_audio_source,
+            import_asset_file,
             save_image_to_downloads,
             copy_image_to_clipboard,
             copy_image_source_to_clipboard,
