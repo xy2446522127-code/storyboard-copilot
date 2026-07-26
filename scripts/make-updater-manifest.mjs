@@ -12,6 +12,9 @@ if (!/^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version))
 const repository = 'xy2446522127-code/storyboard-copilot';
 const tag = `v${version.replace(/^v/, '')}`;
 const artifactName = basename(resolve(artifact));
+if (basename(resolve(output)) !== 'latest.json') {
+  throw new Error('The updater manifest must be named exactly latest.json so the application can resolve the stable GitHub Releases URL.');
+}
 if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(artifactName)) {
   throw new Error(`Update artifact names must use ASCII letters, digits, dots, underscores and hyphens: ${artifactName}`);
 }
