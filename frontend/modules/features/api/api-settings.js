@@ -18,6 +18,38 @@ function splitModels(value) {
   return [...new Set(String(value || "").split(/[，,\n]/).map((item) => item.trim()).filter(Boolean))];
 }
 
+// Keep a compatible provider record for recovered node pickers. The backend F-drive
+// settings remain authoritative; this mirror only preserves legacy node usability.
+function syncLegacyProvider({ id, name, baseUrl, key, models, kind }) {
+  try {
+    const storageKey = "storyboard-copilot-settings";
+    const raw = JSON.parse(localStorage.getItem(storageKey) || "{}");
+    const state = raw.state && typeof raw.state === "object" ? raw.state : raw;
+    const providers = Array.isArray(state.providers) ? state.providers : [];
+    const customProviders = Array.isArray(state.customProviders) ? state.customProviders : [];
+    const previous = customProviders.find((provider) => provider?.id === id) || {};
+    const compatible = {
+      ...previous, id, name, baseUrl,
+      apiKey: key || previous.apiKey || "",
+      modelName: models[0] || previous.modelName || "",
+      models,
+      capabilities: [...new Set([...(previous.capabilities || []), kind])],
+      enabled: true,
+    };
+    state.customProviders = [...customProviders.filter((provider) => provider?.id !== id), compatible];
+    state.providers = providers.map((provider) => provider?.id === id
+      ? { ...provider, name, baseUrl, apiKey: key || provider.apiKey || "", modelName: compatible.modelName, enabled: true }
+      : provider);
+    if (raw.state) raw.state = state;
+    else Object.assign(raw, state);
+    localStorage.setItem(storageKey, JSON.stringify(raw));
+    return true;
+  } catch (error) {
+    console.warn("[HuahaiCanvas] legacy provider compatibility sync failed", error);
+    return false;
+  }
+}
+
 export function installApiSettings() {
   const panel = document.createElement("section");
   panel.id = "huahai-api-settings";
@@ -139,6 +171,7 @@ export function installApiSettings() {
       await invoke("set_base_url", { provider: id, url: baseUrl });
       const caps = capabilities();
       await invoke("save_api_model_catalog", { providerId: id, kind, models: models.map((model) => ({ id: model, label: model, capabilities: caps })) });
+      syncLegacyProvider({ id, name, baseUrl, key: field("key").value, models, kind });
       selectedProviderId = id;
       await load();
       toast(`${tabs.find(([entry]) => entry === kind)?.[1]}已保存。`, "success");
