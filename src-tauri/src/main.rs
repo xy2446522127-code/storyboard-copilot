@@ -8,7 +8,7 @@ use reqwest::{Client, Url};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     io::Write,
     path::PathBuf,
@@ -3364,9 +3364,65 @@ fn apply_canvas_batch_action(
         };
         primary.then(secondary).then(left.cmp(right))
     });
+    if action == "arrange-connected" {
+        let stable = image_ids.clone();
+        let selected: HashSet<&str> = stable.iter().map(String::as_str).collect();
+        let mut incoming: HashMap<&str, usize> = stable.iter().map(|id| (id.as_str(), 0)).collect();
+        let mut outgoing: HashMap<&str, Vec<&str>> =
+            stable.iter().map(|id| (id.as_str(), Vec::new())).collect();
+        for edge in &edges {
+            let source = edge.get("source").and_then(serde_json::Value::as_str);
+            let target = edge.get("target").and_then(serde_json::Value::as_str);
+            if let (Some(source), Some(target)) = (source, target) {
+                if selected.contains(source) && selected.contains(target) && source != target {
+                    outgoing.entry(source).or_default().push(target);
+                    *incoming.entry(target).or_default() += 1;
+                }
+            }
+        }
+        let stable_index: HashMap<&str, usize> = stable
+            .iter()
+            .enumerate()
+            .map(|(index, id)| (id.as_str(), index))
+            .collect();
+        let mut ready = stable
+            .iter()
+            .map(String::as_str)
+            .filter(|id| incoming.get(id).copied().unwrap_or(0) == 0)
+            .collect::<Vec<_>>();
+        ready.sort_by_key(|id| stable_index.get(id).copied().unwrap_or(usize::MAX));
+        let mut ordered = Vec::with_capacity(stable.len());
+        while let Some(id) = ready.first().copied() {
+            ready.remove(0);
+            if ordered.contains(&id) {
+                continue;
+            }
+            ordered.push(id);
+            let mut next = outgoing.get(id).cloned().unwrap_or_default();
+            next.sort_by_key(|child| stable_index.get(child).copied().unwrap_or(usize::MAX));
+            for child in next {
+                let degree = incoming.entry(child).or_default();
+                *degree = degree.saturating_sub(1);
+                if *degree == 0 {
+                    ready.push(child);
+                }
+            }
+            ready.sort_by_key(|candidate| {
+                stable_index.get(candidate).copied().unwrap_or(usize::MAX)
+            });
+        }
+        // Cycles and disconnected nodes retain the spatially stable fallback order.
+        let remaining = stable
+            .iter()
+            .map(String::as_str)
+            .filter(|id| !ordered.contains(id))
+            .collect::<Vec<_>>();
+        ordered.extend(remaining);
+        image_ids = ordered.into_iter().map(ToOwned::to_owned).collect();
+    }
 
     match action.as_str() {
-        "arrange-horizontal" | "arrange-vertical" => {
+        "arrange-horizontal" | "arrange-vertical" | "arrange-connected" => {
             if image_ids.len() < 2 {
                 return Err("select at least two image nodes".to_string());
             }
