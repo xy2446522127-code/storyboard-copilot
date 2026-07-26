@@ -3,6 +3,9 @@ import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
 const config = JSON.parse(readFileSync(resolve(root, "src-tauri/tauri.conf.json"), "utf8"));
+if (config?.bundle?.useLocalToolsDir !== true) {
+  throw new Error("Release builds must keep Tauri packaging tools in the F-drive Cargo target directory.");
+}
 const mode = config?.bundle?.windows?.webviewInstallMode;
 if (mode?.type !== "fixedRuntime" || typeof mode.path !== "string" || !mode.path.startsWith("./webview2-runtime/")) {
   throw new Error("Windows releases must use an F-drive bundled fixed WebView2 runtime, not a system installer.");
