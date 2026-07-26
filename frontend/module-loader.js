@@ -32,6 +32,7 @@
         "/modules/styles/shell.css",
         "/modules/features/sidebar/sidebar.css",
         "/modules/features/api/api-settings.css",
+        "/modules/features/api/legacy-model-bridge.css",
         "/modules/features/image/image-studio.css",
         "/modules/features/chat/chat.css",
         "/modules/features/canvas/batch-tools.css",

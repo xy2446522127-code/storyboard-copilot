@@ -79,6 +79,11 @@ body.huahai-sidebar-open #huahai-sidebar { transform: translateX(0); }
 .huahai-sidebar__collapse:hover { color: var(--hh-text); background: #eaf0fa; }
 .huahai-nav-button:hover, .huahai-sidebar__extra button:hover, .huahai-sidebar__bottom button:hover, .huahai-sidebar__collapse:hover { color: #182034; }
 .huahai-nav-icon { width: 20px; text-align: center; color: currentColor; font-size: 18px; }
+.huahai-sidebar-icon { width: 20px; height: 20px; flex: 0 0 20px; }
+.huahai-sidebar-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.huahai-sidebar__collapse .huahai-sidebar-label { display: none; }
+.huahai-sidebar__section .huahai-sidebar-icon { transition: transform 160ms ease; }
+.huahai-sidebar__section[aria-expanded="true"] .huahai-sidebar-icon { transform: rotate(90deg); }
 
 .huahai-sidebar__spacer { flex: 1; min-height: 22px; }
 .huahai-sidebar__bottom { display: grid; gap: 4px; padding: 10px 0; border-top: 1px solid var(--hh-border); }

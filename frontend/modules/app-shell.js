@@ -1,6 +1,7 @@
 import { installBranding } from "./features/branding/branding.js";
 import { installSidebar } from "./features/sidebar/sidebar.js";
 import { installApiSettings } from "./features/api/api-settings.js";
+import { installLegacyModelBridge } from "./features/api/legacy-model-bridge.js";
 import { installImageStudio } from "./features/image/image-studio.js";
 import { installChatPanel } from "./features/chat/chat.js";
 import { installCanvasBatchTools } from "./features/canvas/batch-tools.js";
@@ -18,6 +19,7 @@ function boot() {
   };
   optional("品牌", installBranding);
   const apiSettings = optional("API 设置", installApiSettings, { open: () => {} });
+  optional("旧版模型选择", installLegacyModelBridge);
   const imageStudio = optional("在线生图", () => installImageStudio({ openApiSettings: () => apiSettings.open() }), { open: () => {} });
   const announcements = optional("公告", installAnnouncements, { open: () => {} });
   // The recovered application still owns several production-only creation tools.

@@ -6510,6 +6510,10 @@ fn main() {
         .manage(StoreLock::default())
         .manage(ChatStreamState::default())
         .manage(GenerationJobState::default())
+        // The recovered production UI already calls `plugin:dialog|open` for
+        // upload nodes and the asset library. Register the official dialog
+        // plugin instead of replacing those stable legacy entry points.
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // Migrate all mutable state out of the installation directory before

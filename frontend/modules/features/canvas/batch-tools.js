@@ -21,18 +21,39 @@ export function installCanvasBatchTools() {
   document.body.append(toolbar);
   let selected = [];
   let refreshTimer;
+  let selectionRevision = 0;
 
-  const refresh = () => {
+  const setImageActionAvailability = (enabled) => {
+    toolbar.querySelectorAll('[data-batch-action="connect-video"], [data-batch-action="arrange-horizontal"], [data-batch-action="arrange-vertical"], [data-batch-action="arrange-connected"]')
+      .forEach((button) => { button.disabled = !enabled; });
+  };
+
+  // The recovered node renderer can defer an image preview or use a CSS
+  // background. Testing for a selected `<img>` therefore hides valid image
+  // nodes. Ask the same persisted canvas classifier that executes the action.
+  const refresh = async () => {
     selected = selectedFlowNodeIds();
-    const images = [...document.querySelectorAll(".react-flow__node.selected img, .xyflow__node.selected img")];
+    const revision = ++selectionRevision;
     const selectedNodes = [...document.querySelectorAll(".react-flow__node.selected, .xyflow__node.selected")];
     const hasGroup = selectedNodes.some((node) => (node.innerText || "").includes("分组"));
-    const visible = (selected.length >= 2 && images.length >= 2) || hasGroup;
-    toolbar.classList.toggle("is-visible", visible);
-    toolbar.querySelectorAll('[data-batch-action="connect-video"], [data-batch-action="arrange-horizontal"], [data-batch-action="arrange-vertical"], [data-batch-action="arrange-connected"]')
-      .forEach((button) => { button.disabled = images.length < 2; });
+    toolbar.classList.toggle("is-visible", hasGroup || selected.length >= 2);
+    setImageActionAvailability(false);
     toolbar.querySelector('[data-batch-action="group"]').disabled = selected.length < 2;
     toolbar.querySelector('[data-batch-action="ungroup"]').disabled = !hasGroup;
+    if (selected.length < 2) return;
+    try {
+      const projectId = await invoke("find_project_for_canvas_selection", { nodeIds: selected });
+      if (!projectId || revision !== selectionRevision) return;
+      const preview = await invoke("preview_canvas_batch_action", { projectId, selectedNodeIds: selected });
+      if (revision !== selectionRevision) return;
+      const hasImages = (preview?.imageNodeIds || []).length >= 2;
+      toolbar.classList.toggle("is-visible", hasImages || hasGroup);
+      setImageActionAvailability(hasImages);
+    } catch {
+      // Newly created legacy nodes may not have completed their autosave yet.
+      // Keep grouping available and retry on the next pointer/key selection
+      // change; never change or intercept the legacy canvas in this path.
+    }
   };
   const delayedRefresh = () => {
     window.clearTimeout(refreshTimer);
