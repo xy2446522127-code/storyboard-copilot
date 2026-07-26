@@ -36,7 +36,7 @@ function readAsDataUrl(file) {
 }
 
 function clickLegacySave() {
-  const save = [...document.querySelectorAll("button")].find((button) => /保存(?:画布|项目)?/.test(button.textContent || ""));
+  const save = [...document.querySelectorAll("button")].find((button) => (button.textContent || "").trim() === "保存画布");
   if (!save || save.disabled) return false;
   save.click();
   return true;
