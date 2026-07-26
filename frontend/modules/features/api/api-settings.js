@@ -107,6 +107,7 @@ export function installApiSettings() {
           <label>API Key<input data-field="key" type="password" placeholder="留空则保留已保存的密钥" autocomplete="new-password" /></label>
           <div class="huahai-api__model-label"><span>模型列表</span><button type="button" data-action="fetch-models">拉取模型</button></div>
           <textarea data-field="models" required rows="4" placeholder="一个或多个模型，使用逗号或换行分隔"></textarea>
+          <div class="huahai-api__model-picker" data-model-picker hidden><input type="search" data-field="model-search" placeholder="搜索已拉取的模型" /><select data-field="model-options" multiple size="8" aria-label="选择模型"></select><small>勾选模型会写入当前分类；同一服务可分别配置图像、对话、视频和音频模型。</small></div>
           <fieldset data-capabilities><legend>模型能力</legend></fieldset>
           <div class="huahai-api__actions"><button type="button" data-action="new">新建</button><button type="button" data-action="save-connection">保存连接</button><button type="button" data-action="test-connection">测试连接</button><button type="submit" class="primary">保存此分类</button></div>
         </form>
@@ -126,8 +127,22 @@ export function installApiSettings() {
   let kind = "image";
   let providers = [];
   let selectedProviderId = "";
+  let fetchedModels = [];
 
   const field = (name) => form.querySelector(`[data-field="${name}"]`);
+  const modelPicker = form.querySelector("[data-model-picker]");
+  const renderModelPicker = () => {
+    const filter = safeText(field("model-search").value).toLowerCase();
+    const selected = new Set(splitModels(field("models").value));
+    const options = fetchedModels.filter((model) => model.toLowerCase().includes(filter));
+    field("model-options").replaceChildren(...options.map((model) => {
+      const option = document.createElement("option");
+      option.value = model;
+      option.textContent = model;
+      option.selected = selected.has(model);
+      return option;
+    }));
+  };
   const capabilities = () => Object.fromEntries([...capabilityNode.querySelectorAll("input")].map((input) => [input.value, input.checked]));
   const ensureProviderId = () => {
     const existing = safeText(field("id").value).replace(/[^a-zA-Z0-9_-]/g, "-").replace(/^-+|-+$/g, "");
@@ -165,6 +180,8 @@ export function installApiSettings() {
     const catalog = (provider.model_catalog || []).find((entry) => entry.kind === kind);
     const models = catalog?.models || provider.models || [];
     field("models").value = models.map((model) => typeof model === "string" ? model : model.id).filter(Boolean).join("\n");
+    fetchedModels = [];
+    modelPicker.hidden = true;
     const saved = new Set(Object.entries(catalog?.models?.[0]?.capabilities || {}).filter(([, enabled]) => enabled).map(([name]) => name));
     capabilityNode.querySelectorAll("input").forEach((input) => { input.checked = saved.has(input.value); });
     providersNode.querySelectorAll("button").forEach((button) => button.classList.toggle("is-active", button.dataset.provider === id));
@@ -187,6 +204,8 @@ export function installApiSettings() {
   const newProvider = () => {
     selectedProviderId = "";
     form.reset();
+    fetchedModels = [];
+    modelPicker.hidden = true;
     field("key").placeholder = "请输入 API Key";
     capabilityNode.querySelectorAll("input").forEach((input) => { input.checked = false; });
     providersNode.querySelectorAll("button").forEach((button) => button.classList.remove("is-active"));
@@ -262,6 +281,10 @@ export function installApiSettings() {
         const models = key
           ? await invoke("list_remote_models", { baseUrl, apiKey: key })
           : await invoke("list_saved_provider_models", { providerId: selectedProviderId });
+        fetchedModels = models;
+        field("model-search").value = "";
+        modelPicker.hidden = false;
+        renderModelPicker();
         field("models").value = models.join("\n");
         if (!selectedProviderId && !safeText(field("id").value)) ensureProviderId();
         toast(`已获取 ${models.length} 个模型。`, "success");
@@ -290,6 +313,11 @@ export function installApiSettings() {
     panel.querySelectorAll("[data-kind]").forEach((button) => button.classList.toggle("is-active", button.dataset.kind === kind));
     renderCapabilities();
     if (selectedProviderId) selectProvider(selectedProviderId); else newProvider();
+  });
+  field("model-search").addEventListener("input", renderModelPicker);
+  field("model-options").addEventListener("change", () => {
+    const selected = [...field("model-options").selectedOptions].map((option) => option.value);
+    if (selected.length) field("models").value = selected.join("\n");
   });
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
