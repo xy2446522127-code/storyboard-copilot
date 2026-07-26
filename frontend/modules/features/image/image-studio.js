@@ -130,7 +130,15 @@ export function installImageStudio({ openApiSettings } = {}) {
     jobsNode.replaceChildren(...jobs.map((job) => {
       const card = document.createElement("article");
       card.className = `huahai-image__job is-${job.status}`;
-      card.innerHTML = `<div><strong>${job.status === "succeeded" ? "已完成" : job.status === "failed" ? "失败" : "生成中"}</strong><span>${job.modelLabel}</span></div><p>${job.error || job.prompt}</p>`;
+      const heading = document.createElement("div");
+      const state = document.createElement("strong");
+      state.textContent = job.status === "succeeded" ? "已完成" : job.status === "failed" ? "失败" : "生成中";
+      const model = document.createElement("span");
+      model.textContent = job.modelLabel || "未标注模型";
+      heading.append(state, model);
+      const detail = document.createElement("p");
+      detail.textContent = job.error || job.prompt || "已保存的生成任务";
+      card.append(heading, detail);
       if (job.result) {
         const image = document.createElement("img"); image.src = job.result; image.alt = "生成结果"; image.addEventListener("click", () => window.open(job.result, "_blank")); card.append(image);
         const actions = document.createElement("div"); actions.className = "huahai-image__job-actions";
