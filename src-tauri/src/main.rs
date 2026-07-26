@@ -364,7 +364,39 @@ struct Settings {
     #[serde(default)]
     custom_providers: Vec<serde_json::Value>,
     #[serde(default)]
+    model_catalog: Vec<serde_json::Value>,
+    #[serde(default)]
     service_base_url: Option<String>,
+}
+
+fn model_kind_is_valid(kind: &str) -> bool {
+    matches!(kind, "image" | "chat" | "video" | "audio")
+}
+
+fn normalized_catalog_models(models: &[serde_json::Value]) -> Result<Vec<serde_json::Value>, String> {
+    let mut normalized = Vec::new();
+    for model in models {
+        let id = model
+            .as_str()
+            .or_else(|| model.get("id").and_then(serde_json::Value::as_str))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or("model id is required")?;
+        let label = model
+            .get("label")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(id);
+        let capabilities = model.get("capabilities").cloned().unwrap_or_else(|| serde_json::json!({}));
+        if !capabilities.is_object() {
+            return Err("model capabilities must be an object".to_string());
+        }
+        normalized.push(serde_json::json!({"id": id, "label": label, "capabilities": capabilities}));
+    }
+    normalized.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
+    normalized.dedup_by(|left, right| left["id"] == right["id"]);
+    Ok(normalized)
 }
 
 fn app_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -2939,10 +2971,7 @@ fn list_models(app: AppHandle, lock: State<StoreLock>) -> Result<Vec<String>, St
         .lock()
         .map_err(|_| "settings store lock poisoned".to_string())?;
     let settings: Settings = read_json(settings_path(&app)?)?;
-    let mut models = vec![
-        "grsai/gpt-image-2".to_string(),
-        "grsai/gpt-image-2-1k".to_string(),
-    ];
+    let mut models = Vec::new();
     for provider in settings.custom_providers {
         let Some(provider_id) = provider.get("id").and_then(serde_json::Value::as_str) else {
             continue;
@@ -2967,6 +2996,79 @@ fn list_models(app: AppHandle, lock: State<StoreLock>) -> Result<Vec<String>, St
     models.sort();
     models.dedup();
     Ok(models)
+}
+
+#[tauri::command]
+fn list_api_provider_settings(app: AppHandle, lock: State<StoreLock>) -> Result<Vec<serde_json::Value>, String> {
+    let _guard = lock.0.lock().map_err(|_| "settings store lock poisoned".to_string())?;
+    let settings: Settings = read_json(settings_path(&app)?)?;
+    let mut providers = settings.custom_providers;
+    for provider in providers.iter_mut() {
+        let Some(id) = provider.get("id").and_then(serde_json::Value::as_str).map(ToOwned::to_owned) else { continue; };
+        let configured_base_url = settings.base_urls.get(&id).cloned();
+        let configured_key = settings.api_keys.get(&id).is_some_and(|key| !key.trim().is_empty());
+        let catalog = settings.model_catalog.iter().filter(|entry| entry.get("providerId").and_then(serde_json::Value::as_str) == Some(id.as_str())).cloned().collect::<Vec<_>>();
+        if let Some(object) = provider.as_object_mut() {
+            object.insert("base_url".to_string(), serde_json::Value::String(configured_base_url.or_else(|| object.get("base_url").and_then(serde_json::Value::as_str).map(ToOwned::to_owned)).unwrap_or_default()));
+            object.insert("key_configured".to_string(), serde_json::Value::Bool(configured_key));
+            object.insert("model_catalog".to_string(), serde_json::Value::Array(catalog));
+        }
+    }
+    providers.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
+    Ok(providers)
+}
+
+#[tauri::command]
+fn save_api_model_catalog(
+    app: AppHandle,
+    provider_id: String,
+    kind: String,
+    models: Vec<serde_json::Value>,
+    lock: State<StoreLock>,
+) -> Result<(), String> {
+    let provider_id = provider_id.trim();
+    let kind = kind.trim();
+    if provider_id.is_empty() || !model_kind_is_valid(kind) {
+        return Err("invalid provider or model kind".to_string());
+    }
+    let models = normalized_catalog_models(&models)?;
+    let _guard = lock.0.lock().map_err(|_| "settings store lock poisoned".to_string())?;
+    let mut settings: Settings = read_json(settings_path(&app)?)?;
+    settings.model_catalog.retain(|entry| !(entry.get("providerId").and_then(serde_json::Value::as_str) == Some(provider_id) && entry.get("kind").and_then(serde_json::Value::as_str) == Some(kind)));
+    settings.model_catalog.push(serde_json::json!({"providerId": provider_id, "kind": kind, "models": models}));
+    write_json(settings_path(&app)?, &settings)
+}
+
+#[tauri::command]
+fn list_configured_models(
+    app: AppHandle,
+    kind: String,
+    lock: State<StoreLock>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let kind = kind.trim();
+    if !model_kind_is_valid(kind) { return Err("invalid model kind".to_string()); }
+    let _guard = lock.0.lock().map_err(|_| "settings store lock poisoned".to_string())?;
+    let settings: Settings = read_json(settings_path(&app)?)?;
+    let provider_names = settings.custom_providers.iter().filter_map(|provider| {
+        Some((provider.get("id")?.as_str()?.to_string(), provider.get("name").and_then(serde_json::Value::as_str).unwrap_or_default().to_string()))
+    }).collect::<HashMap<_, _>>();
+    let mut items = Vec::new();
+    for entry in settings.model_catalog {
+        if entry.get("kind").and_then(serde_json::Value::as_str) != Some(kind) { continue; }
+        let Some(provider_id) = entry.get("providerId").and_then(serde_json::Value::as_str) else { continue; };
+        if !settings.api_keys.get(provider_id).is_some_and(|key| !key.trim().is_empty()) { continue; }
+        for model in entry.get("models").and_then(serde_json::Value::as_array).into_iter().flatten() {
+            items.push(serde_json::json!({
+                "providerId": provider_id,
+                "providerName": provider_names.get(provider_id).cloned().unwrap_or_else(|| provider_id.to_string()),
+                "id": model.get("id").and_then(serde_json::Value::as_str).unwrap_or_default(),
+                "label": model.get("label").and_then(serde_json::Value::as_str).unwrap_or_default(),
+                "capabilities": model.get("capabilities").cloned().unwrap_or_else(|| serde_json::json!({}))
+            }));
+        }
+    }
+    items.sort_by(|left, right| left["label"].as_str().cmp(&right["label"].as_str()));
+    Ok(items)
 }
 
 #[tauri::command]
@@ -3862,6 +3964,9 @@ fn main() {
             register_custom_provider,
             unregister_custom_provider,
             list_models,
+            list_api_provider_settings,
+            save_api_model_catalog,
+            list_configured_models,
             list_remote_models,
             auth_login,
             auth_register,

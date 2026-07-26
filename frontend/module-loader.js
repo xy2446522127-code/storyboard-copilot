@@ -32,6 +32,7 @@
         "/modules/styles/shell.css",
         "/modules/features/workspace/workspace.css",
         "/modules/features/sidebar/sidebar.css",
+        "/modules/features/api/api-settings.css",
         "/modules/features/chat/chat.css",
         "/modules/features/canvas/batch-tools.css",
         "/modules/features/announcements/announcements.css",

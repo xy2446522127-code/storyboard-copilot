@@ -1,0 +1,149 @@
+import { invoke, safeText, toast } from "../../shared/tauri.js";
+
+const tabs = [
+  ["image", "图像模型"],
+  ["chat", "对话模型"],
+  ["video", "视频模型"],
+  ["audio", "音频模型"],
+];
+
+const capabilityLabels = {
+  image: [["negativePrompt", "负面提示词"], ["multiReference", "多参考图"], ["customSize", "自定义尺寸"], ["seed", "随机种子"], ["imageEdit", "图片编辑"]],
+  chat: [["stream", "流式回复"], ["vision", "图片理解"]],
+  video: [["multiReference", "多参考图"], ["firstLastFrame", "首尾帧"], ["customSize", "自定义尺寸"]],
+  audio: [],
+};
+
+function splitModels(value) {
+  return [...new Set(String(value || "").split(/[，,\n]/).map((item) => item.trim()).filter(Boolean))];
+}
+
+export function installApiSettings() {
+  const panel = document.createElement("section");
+  panel.id = "huahai-api-settings";
+  panel.setAttribute("aria-label", "API 设置");
+  panel.innerHTML = `
+    <div class="huahai-api__backdrop" data-action="close"></div>
+    <div class="huahai-api__dialog" role="dialog" aria-modal="true">
+      <header><div><strong>API 设置</strong><p>密钥仅保存在本机 F 盘，界面不会显示已保存的完整密钥。</p></div><button type="button" data-action="close" title="关闭">×</button></header>
+      <nav class="huahai-api__tabs">${tabs.map(([id, label]) => `<button type="button" data-kind="${id}">${label}</button>`).join("")}</nav>
+      <div class="huahai-api__layout">
+        <aside><div class="huahai-api__provider-title">已配置服务</div><div data-providers></div></aside>
+        <form data-form>
+          <label>服务标识<input data-field="id" required placeholder="例如 my-api" autocomplete="off" /></label>
+          <label>显示名称<input data-field="name" required placeholder="例如 我的 API 中转" /></label>
+          <label>服务地址<input data-field="baseUrl" type="url" required placeholder="https://example.com/v1" /></label>
+          <label>API Key<input data-field="key" type="password" placeholder="留空则保留已保存的密钥" autocomplete="new-password" /></label>
+          <div class="huahai-api__model-label"><span>模型列表</span><button type="button" data-action="fetch-models">拉取模型</button></div>
+          <textarea data-field="models" required rows="4" placeholder="一个或多个模型，使用逗号或换行分隔"></textarea>
+          <fieldset data-capabilities><legend>模型能力</legend></fieldset>
+          <div class="huahai-api__actions"><button type="button" data-action="new">新建</button><button type="submit" class="primary">保存此分类</button></div>
+        </form>
+      </div>
+    </div>`;
+  document.body.append(panel);
+
+  const form = panel.querySelector("[data-form]");
+  const providersNode = panel.querySelector("[data-providers]");
+  const capabilityNode = panel.querySelector("[data-capabilities]");
+  let kind = "image";
+  let providers = [];
+  let selectedProviderId = "";
+
+  const field = (name) => form.querySelector(`[data-field="${name}"]`);
+  const capabilities = () => Object.fromEntries([...capabilityNode.querySelectorAll("input")].map((input) => [input.value, input.checked]));
+  const renderCapabilities = () => {
+    capabilityNode.replaceChildren(...(capabilityLabels[kind] || []).map(([id, label]) => {
+      const row = document.createElement("label");
+      row.innerHTML = `<input type="checkbox" value="${id}" /> ${label}`;
+      return row;
+    }));
+  };
+  const selectProvider = (id) => {
+    selectedProviderId = id;
+    const provider = providers.find((item) => item.id === id);
+    if (!provider) return;
+    field("id").value = provider.id || "";
+    field("name").value = provider.name || provider.id || "";
+    field("baseUrl").value = provider.base_url || "";
+    field("key").value = "";
+    field("key").placeholder = provider.key_configured ? "已保存；留空则不修改" : "请输入 API Key";
+    const catalog = (provider.model_catalog || []).find((entry) => entry.kind === kind);
+    const models = catalog?.models || provider.models || [];
+    field("models").value = models.map((model) => typeof model === "string" ? model : model.id).filter(Boolean).join("\n");
+    const saved = new Set(Object.entries(catalog?.models?.[0]?.capabilities || {}).filter(([, enabled]) => enabled).map(([name]) => name));
+    capabilityNode.querySelectorAll("input").forEach((input) => { input.checked = saved.has(input.value); });
+    providersNode.querySelectorAll("button").forEach((button) => button.classList.toggle("is-active", button.dataset.provider === id));
+  };
+  const renderProviders = () => {
+    providersNode.replaceChildren(...providers.map((provider) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.provider = provider.id;
+      button.textContent = `${provider.name || provider.id}${provider.key_configured ? " · 已配置" : " · 缺少密钥"}`;
+      button.addEventListener("click", () => selectProvider(provider.id));
+      return button;
+    }));
+    if (providers.length) selectProvider(selectedProviderId || providers[0].id);
+  };
+  const load = async () => {
+    providers = await invoke("list_api_provider_settings");
+    renderProviders();
+  };
+  const newProvider = () => {
+    selectedProviderId = "";
+    form.reset();
+    field("key").placeholder = "请输入 API Key";
+    capabilityNode.querySelectorAll("input").forEach((input) => { input.checked = false; });
+    providersNode.querySelectorAll("button").forEach((button) => button.classList.remove("is-active"));
+  };
+  const open = async () => {
+    panel.classList.add("is-open");
+    panel.querySelector(`[data-kind="${kind}"]`).classList.add("is-active");
+    try { await load(); } catch (error) { toast(`无法读取 API 设置：${String(error)}`, "error"); }
+  };
+
+  panel.addEventListener("click", async (event) => {
+    const action = event.target.closest("[data-action]")?.dataset.action;
+    if (action === "close") panel.classList.remove("is-open");
+    if (action === "new") newProvider();
+    if (action === "fetch-models") {
+      const baseUrl = safeText(field("baseUrl").value);
+      const key = field("key").value;
+      if (!baseUrl || !key) return toast("请先填写服务地址和本次 API Key，再拉取模型。", "info");
+      try {
+        const models = await invoke("list_remote_models", { baseUrl, apiKey: key });
+        field("models").value = models.join("\n");
+        toast(`已获取 ${models.length} 个模型。`, "success");
+      } catch (error) { toast(`获取模型失败：${String(error)}`, "error"); }
+    }
+  });
+  panel.querySelector(".huahai-api__tabs").addEventListener("click", (event) => {
+    const next = event.target.closest("[data-kind]")?.dataset.kind;
+    if (!next || next === kind) return;
+    kind = next;
+    panel.querySelectorAll("[data-kind]").forEach((button) => button.classList.toggle("is-active", button.dataset.kind === kind));
+    renderCapabilities();
+    if (selectedProviderId) selectProvider(selectedProviderId); else newProvider();
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const id = safeText(field("id").value).replace(/[^a-zA-Z0-9_-]/g, "-");
+    const name = safeText(field("name").value, id);
+    const baseUrl = safeText(field("baseUrl").value).replace(/\/$/, "");
+    const models = splitModels(field("models").value);
+    if (!id || !name || !baseUrl || !models.length) return toast("请填写服务、地址和至少一个模型。", "error");
+    try {
+      await invoke("register_custom_provider", { config: { id, name, base_url: baseUrl, models } });
+      if (field("key").value) await invoke("set_api_key", { provider: id, key: field("key").value });
+      await invoke("set_base_url", { provider: id, url: baseUrl });
+      const caps = capabilities();
+      await invoke("save_api_model_catalog", { providerId: id, kind, models: models.map((model) => ({ id: model, label: model, capabilities: caps })) });
+      selectedProviderId = id;
+      await load();
+      toast(`${tabs.find(([entry]) => entry === kind)?.[1]}已保存。`, "success");
+    } catch (error) { toast(`保存 API 设置失败：${String(error)}`, "error"); }
+  });
+  renderCapabilities();
+  return { open };
+}
