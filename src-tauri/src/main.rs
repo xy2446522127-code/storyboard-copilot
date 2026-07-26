@@ -2017,7 +2017,16 @@ fn export_project_to_file(
         "project": project,
     });
     let content = serde_json::to_string_pretty(&export).map_err(|error| error.to_string())?;
-    fs::write(file_path, content).map_err(|error| error.to_string())
+    let destination = PathBuf::from(file_path);
+    if !is_f_drive_path(&destination) {
+        return Err("project exports must be saved on F: drive".to_string());
+    }
+    let parent = destination
+        .parent()
+        .filter(|parent| is_f_drive_path(parent))
+        .ok_or("project export path is invalid".to_string())?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    fs::write(destination, content).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
