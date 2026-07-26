@@ -39,6 +39,11 @@ if "%~2"=="" (
 ) else (
   set "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=%~2"
 )
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0prepare-fixed-webview-runtime.ps1"
+if not "%ERRORLEVEL%"=="0" (
+  popd
+  exit /b %ERRORLEVEL%
+)
 "C:\Users\DXY\.cargo\bin\cargo.exe" tauri build --bundles nsis
 set "BUILD_ERROR=%ERRORLEVEL%"
 if not "%BUILD_ERROR%"=="0" (

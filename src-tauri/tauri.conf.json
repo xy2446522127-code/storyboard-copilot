@@ -1,6 +1,6 @@
 {
   "productName": "花海画布",
-  "version": "5.8.9",
+  "version": "5.9.0",
   "identifier": "com.huahai.canvas",
   "build": { "frontendDist": "../frontend" },
   "app": { "security": { "csp": null } },
@@ -11,7 +11,10 @@
     "icon": ["icons/huahai-canvas.ico", "icons/huahai-canvas.png"],
     "resources": ["../tools/jimeng_browser.py"],
     "windows": {
-      "webviewInstallMode": { "type": "skip" },
+      "webviewInstallMode": {
+        "type": "fixedRuntime",
+        "path": "./webview2-runtime/Microsoft.WebView2.FixedVersionRuntime.150.0.4078.99.x64"
+      },
       "nsis": {
         "installMode": "currentUser",
         "installerHooks": "./windows/hooks.nsh",

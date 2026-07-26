@@ -14,6 +14,7 @@ New-Item -ItemType Directory -Force -Path $build,$temp,$cargoHome | Out-Null
 $env:CARGO_TARGET_DIR = $build; $env:CARGO_HOME = $cargoHome; $env:TEMP = $temp; $env:TMP = $temp; $env:TMPDIR = $temp
 $env:TAURI_SIGNING_PRIVATE_KEY = $PrivateKey
 $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = (Get-Content -LiteralPath $PasswordFile -Raw).Trim()
+& (Join-Path $PSScriptRoot 'prepare-fixed-webview-runtime.ps1')
 Push-Location (Join-Path $root 'src-tauri')
 try { cargo tauri build --bundles nsis; if ($LASTEXITCODE) { throw 'Tauri bundle failed.' } }
 finally { Pop-Location }

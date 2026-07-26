@@ -20,6 +20,7 @@ __pycache__/
 node_modules/
 dist/
 src-tauri/target/
+src-tauri/webview2-runtime/
 
 # Local editor and OS files
 .DS_Store
