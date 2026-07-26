@@ -1276,11 +1276,33 @@ fn python_executable() -> String {
 fn run_jimeng_browser(
     app: &AppHandle,
     action: &str,
-    params: serde_json::Value,
+    mut params: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
+    let runtime_root = persistent_data_dir("jimeng-runtime").map_err(|error| error.to_string())?;
+    let output_dir = runtime_root.join("output");
+    let playwright_dir = runtime_root.join("playwright-browsers");
+    let pip_cache_dir = runtime_root.join("pip-cache");
+    let pycache_dir = runtime_root.join("pycache");
+    for directory in [&output_dir, &playwright_dir, &pip_cache_dir, &pycache_dir] {
+        fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+    }
+    // Video results must remain on F: even if a stale UI sends an old C-drive
+    // output preference. Browser executables themselves can be read from their
+    // normal system installation; only writable profiles/caches/results are
+    // constrained here.
+    if let Some(object) = params.as_object_mut() {
+        object.insert(
+            "output_dir".to_string(),
+            serde_json::Value::String(output_dir.display().to_string()),
+        );
+    }
     let request = serde_json::json!({"action": action, "params": params});
     let mut child = Command::new(python_executable())
         .arg(jimeng_script_path(app)?)
+        .env("HUAHAI_JIMENG_ROOT", &runtime_root)
+        .env("PLAYWRIGHT_BROWSERS_PATH", &playwright_dir)
+        .env("PIP_CACHE_DIR", &pip_cache_dir)
+        .env("PYTHONPYCACHEPREFIX", &pycache_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
