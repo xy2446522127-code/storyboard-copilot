@@ -10,8 +10,15 @@ $config = Get-Content (Join-Path $root 'src-tauri\tauri.conf.json') -Raw | Conve
 $build = "F:\HuahaiBuild\release-$($config.version)"
 $temp = "F:\HuahaiBuild\tmp-release-$($config.version)"
 $cargoHome = 'F:\Huahaihuabu\build-cache\cargo-home'
-New-Item -ItemType Directory -Force -Path $build,$temp,$cargoHome | Out-Null
-$env:CARGO_TARGET_DIR = $build; $env:CARGO_HOME = $cargoHome; $env:TEMP = $temp; $env:TMP = $temp; $env:TMPDIR = $temp
+$npmCache = 'F:\Huahaihuabu\build-cache\npm'
+if (-not (Test-Path -LiteralPath 'F:\')) { throw 'Release builds require the F: drive.' }
+New-Item -ItemType Directory -Force -Path $build,$temp,$cargoHome,$npmCache | Out-Null
+# Keep every cache, build artifact and diagnostic log off the system drive.  The
+# bundled program has its own F: runtime paths; these settings cover the tools
+# that create the signed installer.
+$env:CARGO_TARGET_DIR = $build; $env:CARGO_HOME = $cargoHome
+$env:TEMP = $temp; $env:TMP = $temp; $env:TMPDIR = $temp
+$env:NPM_CONFIG_CACHE = $npmCache
 $env:TAURI_SIGNING_PRIVATE_KEY = $PrivateKey
 $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = (Get-Content -LiteralPath $PasswordFile -Raw).Trim()
 & (Join-Path $PSScriptRoot 'prepare-fixed-webview-runtime.ps1')
