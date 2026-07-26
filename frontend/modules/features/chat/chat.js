@@ -1,44 +1,46 @@
-import { invoke, safeText, toast } from "../../shared/tauri.js";
-
-const defaultProvider = localStorage.getItem("huahai-chat-provider") || "grsai";
-const defaultModel = localStorage.getItem("huahai-chat-model") || "gpt-5-mini";
+import { invoke, safeText, selectedFlowNodeIds, toast } from "../../shared/tauri.js";
 
 function nodeContext() {
   const nodes = [...document.querySelectorAll(".react-flow__node.selected, .xyflow__node.selected")].slice(0, 8);
-  if (!nodes.length) return {};
-  return {
+  return nodes.length ? {
     selectedNodes: nodes.map((node) => ({
       id: node.dataset.id || node.id || "",
       type: node.dataset.type || node.className,
       text: (node.innerText || "").slice(0, 180),
-      mediaReference: node.querySelector("img,video")?.getAttribute("src") || undefined,
+      mediaReference: node.querySelector("img,video")?.getAttribute("src")?.replace(/^data:.*$/, "[本地媒体已隐藏]") || undefined,
     })),
-  };
+  } : {};
 }
 
 function extractActionPreview(content) {
-  const match = content.match(/```(?:json)?\s*(\[[\s\S]*?\])\s*```/i);
+  const match = String(content).match(/```(?:json)?\s*(\[[\s\S]*?\])\s*```/i);
   if (!match) return null;
-  try {
-    const actions = JSON.parse(match[1]);
-    return Array.isArray(actions) ? JSON.stringify(actions) : null;
-  } catch { return null; }
+  try { return Array.isArray(JSON.parse(match[1])) ? match[1] : null; } catch { return null; }
 }
 
-export function installChatPanel() {
+export function installChatPanel({ openApiSettings } = {}) {
   const panel = document.createElement("section");
   panel.id = "huahai-chat-panel";
-  panel.setAttribute("aria-label", "GPT 对话");
+  panel.setAttribute("aria-label", "创作助手");
   panel.innerHTML = `
-    <div class="huahai-chat__head"><strong>GPT 对话</strong><button type="button" data-action="new">＋</button><button type="button" data-action="close">×</button></div>
-    <div class="huahai-chat__settings"><input data-field="provider" aria-label="服务商 ID" value="${defaultProvider}"><input data-field="model" aria-label="模型" value="${defaultModel}"><button type="button" data-action="retry">重试</button></div>
-    <div class="huahai-chat__messages" aria-live="polite"></div>
-    <form class="huahai-chat__composer"><textarea data-field="message" placeholder="输入你的创作需求；默认只发送当前选中节点的文字与媒体引用。"></textarea><div class="huahai-chat__composer-actions"><button type="button" data-action="cancel">取消</button><button type="submit" data-action="send">发送</button></div><label class="huahai-chat__context"><input type="checkbox" data-field="context" checked> 发送当前选中节点摘要（不发送原图、全量画布或 API 密钥）</label></form>`;
+    <div class="huahai-chat__head"><strong>创作助手</strong><span data-scope>通用会话</span><button type="button" data-action="new" title="新建会话">＋</button><button type="button" data-action="close" title="关闭">×</button></div>
+    <div class="huahai-chat__body">
+      <aside class="huahai-chat__sessions"><div><span>会话</span><button type="button" data-action="refresh" title="刷新">↻</button></div><div data-sessions></div></aside>
+      <main class="huahai-chat__main">
+        <div class="huahai-chat__settings"><select data-field="model" aria-label="对话模型"></select><button type="button" data-action="system">系统提示词</button><button type="button" data-action="retry">重试</button></div>
+        <div class="huahai-chat__system" hidden><textarea data-field="system" placeholder="系统提示词仅用于当前会话，不会保存 API Key 或本地路径。"></textarea></div>
+        <div class="huahai-chat__messages" aria-live="polite"></div>
+        <form class="huahai-chat__composer"><textarea data-field="message" placeholder="输入创作需求；默认只发送当前选中节点摘要，不发送原图或全量画布。"></textarea><div class="huahai-chat__composer-actions"><button type="button" data-action="cancel" disabled>停止</button><button type="submit" data-action="send">发送</button></div><label class="huahai-chat__context"><input type="checkbox" data-field="context" checked> 发送当前选中节点摘要</label></form>
+      </main>
+    </div>`;
   document.body.append(panel);
   const messages = panel.querySelector(".huahai-chat__messages");
+  const sessionsNode = panel.querySelector("[data-sessions]");
+  const modelNode = panel.querySelector('[data-field="model"]');
   const messageInput = panel.querySelector('[data-field="message"]');
-  let session;
-  let lastRequest = 0;
+  let session = null;
+  let projectId = null;
+  let inFlight = false;
   let lastUserText = "";
 
   const addMessage = (message, kind = message.role) => {
@@ -49,29 +51,57 @@ export function installChatPanel() {
     messages.scrollTop = messages.scrollHeight;
     return node;
   };
+  const renderSessions = (items) => {
+    sessionsNode.replaceChildren(...items.map((item) => {
+      const row = document.createElement("div");
+      row.className = "huahai-chat__session";
+      row.classList.toggle("is-active", item.id === session?.id);
+      row.innerHTML = `<button type="button" data-session="${item.id}" title="${item.title}">${item.title}</button><button type="button" data-rename="${item.id}" title="重命名">⋯</button>`;
+      return row;
+    }));
+  };
+  const loadModels = async () => {
+    const models = await invoke("list_configured_models", { kind: "chat" });
+    modelNode.replaceChildren(...models.map((model) => {
+      const option = document.createElement("option");
+      option.value = `${model.providerId}::${model.id}`;
+      option.textContent = `${model.providerName} · ${model.label || model.id}`;
+      return option;
+    }));
+    if (!models.length) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "请先在 API 设置配置对话模型";
+      modelNode.append(option);
+    }
+  };
+  const loadSessions = async () => renderSessions(await invoke("list_chat_sessions", { projectId }));
   const loadMessages = async () => {
     messages.replaceChildren();
     if (!session) return;
-    const history = await invoke("list_chat_messages", { sessionId: session.id });
-    history.forEach((message) => addMessage(message));
+    (await invoke("list_chat_messages", { sessionId: session.id })).forEach((message) => addMessage(message));
   };
   const ensureSession = async () => {
     if (session) return session;
-    session = await invoke("create_chat_session", {
-      projectId: null,
-      title: "通用对话",
-      model: panel.querySelector('[data-field="model"]').value.trim(),
-    });
+    const [providerId, model] = String(modelNode.value).split("::");
+    session = await invoke("create_chat_session", { projectId, title: projectId ? "项目创作对话" : "新对话", model: model || "", providerId: providerId || "" });
+    await loadSessions();
     return session;
+  };
+  const setBusy = (value) => {
+    inFlight = value;
+    panel.querySelector('[data-action="send"]').disabled = value;
+    panel.querySelector('[data-action="cancel"]').disabled = !value;
   };
   const send = async (text = messageInput.value) => {
     const content = safeText(text);
-    if (!content) return;
-    const request = ++lastRequest;
-    const provider = panel.querySelector('[data-field="provider"]').value.trim() || "grsai";
-    const model = panel.querySelector('[data-field="model"]').value.trim();
-    localStorage.setItem("huahai-chat-provider", provider);
-    localStorage.setItem("huahai-chat-model", model);
+    if (!content || inFlight) return;
+    const [providerId, model] = String(modelNode.value).split("::");
+    if (!providerId || !model) {
+      toast("请先在 API 设置中配置可用的对话模型。", "info");
+      return openApiSettings?.();
+    }
+    setBusy(true);
     try {
       await ensureSession();
       addMessage({ role: "user", content });
@@ -79,47 +109,57 @@ export function installChatPanel() {
       lastUserText = content;
       const pending = addMessage("正在等待模型回复…", "status");
       const context = panel.querySelector('[data-field="context"]').checked ? nodeContext() : {};
-      const reply = await invoke("send_chat_message", {
-        sessionId: session.id,
-        providerId: provider,
-        model,
-        content,
-        contextJson: JSON.stringify(context),
-      });
+      const reply = await invoke("send_chat_message", { sessionId: session.id, providerId, model, content, contextJson: JSON.stringify({ ...context, systemPrompt: safeText(panel.querySelector('[data-field="system"]').value) }) });
       pending.remove();
-      if (request !== lastRequest) return;
       const messageNode = addMessage(reply);
       const actionsJson = extractActionPreview(reply.content);
       if (actionsJson) {
         const preview = document.createElement("div");
         preview.className = "huahai-chat__preview";
-        preview.innerHTML = '<span>检测到操作草案；执行前必须确认。</span><button type="button">创建预览</button>';
+        preview.innerHTML = '<span>检测到画布操作建议；执行前必须确认。</span><button type="button">创建预览</button>';
         preview.querySelector("button").addEventListener("click", async () => {
           try {
-            const stored = await invoke("create_agent_preview", { sessionId: session.id, projectId: null, actionsJson });
-            const approved = window.confirm("预览已保存。它可能包含节点创建、连接、排列、修改或付费生成。确认后仍会逐项提示费用与影响范围。现在确认此预览吗？");
+            const stored = await invoke("create_agent_preview", { sessionId: session.id, projectId, actionsJson });
+            const approved = window.confirm("操作预览已保存。确认后仍会显示影响范围和费用提示；是否确认？");
             await invoke("resolve_agent_preview", { previewId: stored.id, confirm: approved });
             toast(approved ? "操作预览已确认；请在画布中审核后应用。" : "操作预览已拒绝。", approved ? "success" : "info");
           } catch (error) { toast(`无法创建操作预览：${String(error)}`, "error"); }
         });
         messageNode.append(preview);
       }
-    } catch (error) {
-      if (request === lastRequest) addMessage(`对话失败：${String(error)}`, "status");
-    }
+      await loadSessions();
+    } catch (error) { addMessage(`对话失败：${String(error)}`, "status"); }
+    finally { setBusy(false); }
   };
-  panel.querySelector("form").addEventListener("submit", (event) => { event.preventDefault(); send(); });
-  panel.addEventListener("click", (event) => {
+  panel.addEventListener("click", async (event) => {
     const action = event.target.closest("[data-action]")?.dataset.action;
+    const sessionId = event.target.closest("[data-session]")?.dataset.session;
+    const renameId = event.target.closest("[data-rename]")?.dataset.rename;
+    if (sessionId) { session = (await invoke("list_chat_sessions", { projectId })).find((item) => item.id === sessionId) || null; await loadMessages(); await loadSessions(); }
+    if (renameId) {
+      const item = (await invoke("list_chat_sessions", { projectId })).find((entry) => entry.id === renameId);
+      const title = window.prompt("会话名称", item?.title || "");
+      if (title === null) return;
+      if (!title.trim()) return toast("会话名称不能为空。", "error");
+      await invoke("rename_chat_session", { sessionId: renameId, title }); await loadSessions();
+    }
     if (action === "close") panel.classList.remove("is-open");
-    if (action === "new") { session = null; messages.replaceChildren(); toast("已新建未关联项目的本地会话。", "success"); }
-    if (action === "cancel") { lastRequest += 1; toast("已停止等待；服务器端未执行任何画布操作。", "info"); }
+    if (action === "new") { session = null; messages.replaceChildren(); await ensureSession(); }
+    if (action === "refresh") { await loadModels(); await loadSessions(); }
     if (action === "retry" && lastUserText) send(lastUserText);
+    if (action === "cancel" && inFlight) toast("当前版本正在接入流式取消；本次请求会完成但不会执行任何画布操作。", "info");
+    if (action === "system") { const box = panel.querySelector(".huahai-chat__system"); box.hidden = !box.hidden; }
   });
+  panel.querySelector("form").addEventListener("submit", (event) => { event.preventDefault(); send(); });
   return {
     async open() {
       panel.classList.add("is-open");
-      try { await ensureSession(); await loadMessages(); } catch (error) { toast(`无法读取会话：${String(error)}`, "error"); }
+      try {
+        projectId = await invoke("find_project_for_canvas_selection", { nodeIds: selectedFlowNodeIds() });
+        panel.querySelector("[data-scope]").textContent = projectId ? "当前项目会话" : "通用会话";
+        session = null;
+        await loadModels(); await loadSessions();
+      } catch (error) { toast(`无法打开创作助手：${String(error)}`, "error"); }
       messageInput.focus();
     },
   };

@@ -14,7 +14,7 @@ function boot() {
   // The recovered application still owns several production-only creation tools.
   // Keep it as the default until each replacement workspace has independently passed
   // real project regression tests; preview code must never hide or replace #root.
-  const chat = installChatPanel();
+  const chat = installChatPanel({ openApiSettings: () => apiSettings.open() });
   installSidebar({ openChat: () => chat.open(), openAnnouncements: () => announcements.open(), openApiSettings: () => apiSettings.open() });
   installCanvasBatchTools();
   installMediaPerformance();
