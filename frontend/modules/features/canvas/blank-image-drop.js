@@ -49,6 +49,19 @@ function clickLegacySave() {
   return true;
 }
 
+async function savedProjectAfterLegacySave() {
+  // The recovered application does not expose an active-project API.  Its save
+  // operation does, however, update exactly one project's timestamp.  Remember
+  // the timestamps before saving so a blank-canvas drop can target that project
+  // deterministically instead of asking the user to guess from a project list.
+  const before = await invoke("list_project_summaries");
+  const beforeUpdatedAt = new Map(before.map((project) => [project.id, project.updatedAt]));
+  if (!clickLegacySave()) return null;
+  await new Promise((resolve) => window.setTimeout(resolve, 700));
+  const after = await invoke("list_project_summaries");
+  return after.find((project) => beforeUpdatedAt.get(project.id) !== project.updatedAt) || after[0] || null;
+}
+
 export function installBlankCanvasImageDrop() {
   let importing = false;
   const onDragOver = (event) => {
@@ -69,20 +82,12 @@ export function installBlankCanvasImageDrop() {
     if (files.length > 20) return toast("一次最多拖入 20 张图片。", "error");
     const tooLarge = files.find((file) => file.size > MAX_FILE_BYTES);
     if (tooLarge) return toast(`${tooLarge.name} 超过 30 MB，未导入。`, "error");
-    if (!clickLegacySave()) return toast("请先在旧画布中保存项目，再拖入图片。", "info");
     importing = true;
     try {
       // Saving through the legacy button is the compatibility boundary: the old
       // React store remains the single source of truth until it has persisted.
-      await new Promise((resolve) => window.setTimeout(resolve, 700));
-      const projects = await invoke("list_project_summaries");
-      let project = projects[0];
-      if (projects.length > 1) {
-        const choices = projects.slice(0, 12).map((item, index) => `${index + 1}. ${item.name}`).join("\n");
-        const choice = Number(window.prompt(`选择要导入图片的项目：\n${choices}`, "1"));
-        project = projects[choice - 1];
-        if (!Number.isInteger(choice) || !project) return;
-      }
+      const project = await savedProjectAfterLegacySave();
+      if (!project) return toast("请先在旧画布中保存项目，再拖入图片。", "info");
       if (!project?.id) throw new Error("没有找到已保存的项目；请打开项目后再试");
       const accepted = window.confirm(`将 ${files.length} 张图片导入“${project.name}”并重新载入画布吗？\n\n图片会保存到 F 盘媒体库；此操作可用画布撤销。`);
       if (!accepted) return;

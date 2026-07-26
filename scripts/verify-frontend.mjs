@@ -58,4 +58,9 @@ if (!shellStyles.includes('img[src="/zy-logo.jpg"]') || !shellStyles.includes('u
   throw new Error("Recovered header logo must render the 花海画布 icon without React DOM mutation.");
 }
 
+const blankCanvasDrop = readFileSync(resolve(root, "frontend/modules/features/canvas/blank-image-drop.js"), "utf8");
+if (blankCanvasDrop.includes("window.prompt") || !blankCanvasDrop.includes("savedProjectAfterLegacySave")) {
+  throw new Error("Blank-canvas drops must target the just-saved legacy project without an ambiguous project picker.");
+}
+
 console.log(`Recovered frontend assets, ${scripts.length - 1} modules, and credential scan passed.`);
