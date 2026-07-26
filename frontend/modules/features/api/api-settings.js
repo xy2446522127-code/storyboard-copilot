@@ -28,11 +28,15 @@ function syncLegacyProvider({ id, name, baseUrl, key, models, kind }) {
     const providers = Array.isArray(state.providers) ? state.providers : [];
     const customProviders = Array.isArray(state.customProviders) ? state.customProviders : [];
     const previous = customProviders.find((provider) => provider?.id === id) || {};
+    // One service can provide image, chat, video and audio models. The recovered
+    // provider picker only understands one flat list, so never replace earlier
+    // categories when saving the current API-settings tab.
+    const allModels = [...new Set([...(previous.models || []), ...models].filter(Boolean))];
     const compatible = {
       ...previous, id, name, baseUrl,
       apiKey: key || previous.apiKey || "",
-      modelName: models[0] || previous.modelName || "",
-      models,
+      modelName: models[0] || previous.modelName || allModels[0] || "",
+      models: allModels,
       capabilities: [...new Set([...(previous.capabilities || []), kind])],
       enabled: true,
     };
