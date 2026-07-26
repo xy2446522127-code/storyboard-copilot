@@ -25,6 +25,20 @@ function apiFields(field) {
   return { baseUrl: "", apiKey: "" };
 }
 
+function normalizedBaseUrl(value) {
+  return String(value || "").trim().replace(/\/+$/, "");
+}
+
+// The recovered form clears an already-saved password so the WebView cannot
+// read it back. Match its URL to the native F-drive provider record instead.
+async function savedProviderForBaseUrl(baseUrl) {
+  const target = normalizedBaseUrl(baseUrl);
+  if (!target) return null;
+  const providers = await invoke("list_api_provider_settings");
+  return providers.find((provider) => provider?.key_configured
+    && normalizedBaseUrl(provider.base_url || provider.baseUrl) === target) || null;
+}
+
 function insertBridge(field) {
   if (field.dataset.huahaiModelBridge === "true") return;
   field.dataset.huahaiModelBridge = "true";
@@ -49,10 +63,17 @@ function insertBridge(field) {
   const fetchModels = async () => {
     const { baseUrl, apiKey } = apiFields(field);
     if (!baseUrl) return toast("请先填写服务地址，再拉取模型。", "info");
-    if (!apiKey) return toast("请先填写本次 API Key；密钥不会显示、记录或写入浏览器日志。", "info");
     fetchButton.disabled = true; fetchButton.textContent = "拉取中…";
     try {
-      models = await invoke("list_remote_models", { baseUrl, apiKey });
+      if (apiKey) {
+        models = await invoke("list_remote_models", { baseUrl, apiKey });
+      } else {
+        const provider = await savedProviderForBaseUrl(baseUrl);
+        if (!provider) {
+          return toast("未找到此地址对应的已保存密钥。请先保存连接，或仅为本次拉取填写 API Key。", "info");
+        }
+        models = await invoke("list_saved_provider_models", { providerId: provider.id });
+      }
       if (!models.length) return toast("服务已响应，但没有返回可选择的模型。", "info");
       search.hidden = false; select.hidden = false; actions.hidden = false; render();
       toast(`已拉取 ${models.length} 个模型；勾选后点击“使用选中模型”。`, "success");
