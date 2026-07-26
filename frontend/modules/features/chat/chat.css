@@ -7,3 +7,4 @@
 /* A structured assistant preview can contain several actions. Keep it vertical
    so long labels remain readable instead of squeezing the message column. */
 .huahai-chat__preview{display:grid;gap:7px;align-items:initial;margin-top:9px;padding:10px;border:1px solid #3a4b69;border-radius:9px;background:#162031}.huahai-chat__preview strong{color:#f2f6ff}.huahai-chat__preview p{margin:0;line-height:1.45}.huahai-chat__preview ul{display:grid;gap:3px;margin:0;padding-left:18px;color:#b7c5dc}.huahai-chat__preview-note{color:#9fb0c8}.huahai-chat__preview button{justify-self:start;padding:6px 10px;background:#2f4f9c}
+.huahai-chat__message--assistant{position:relative;padding-right:52px}.huahai-chat__copy{position:absolute;top:7px;right:7px;border:1px solid #50617c;border-radius:6px;padding:3px 6px;color:#cdd9ef;background:#182338;cursor:pointer;font-size:11px}.huahai-chat__copy:hover{color:#fff;background:#2f4f9c}

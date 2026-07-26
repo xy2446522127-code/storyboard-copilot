@@ -20,6 +20,26 @@ function extractActionPreview(content) {
   try { return Array.isArray(JSON.parse(match[1])) ? match[1] : null; } catch { return null; }
 }
 
+async function copyChatText(value) {
+  const text = String(value || "").trim();
+  if (!text) return false;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* Fall back for WebView environments without clipboard permission. */ }
+  const input = document.createElement("textarea");
+  input.value = text;
+  input.setAttribute("readonly", "");
+  input.style.cssText = "position:fixed;opacity:0;pointer-events:none";
+  document.body.append(input);
+  input.select();
+  const copied = document.execCommand("copy");
+  input.remove();
+  return copied;
+}
+
 function summarizeAgentActions(actionsJson) {
   try {
     const actions = JSON.parse(actionsJson);
@@ -123,7 +143,21 @@ export function installChatPanel({ openApiSettings } = {}) {
   const addMessage = (message, kind = message.role) => {
     const node = document.createElement("article");
     node.className = `huahai-chat__message huahai-chat__message--${kind}`;
-    node.textContent = message.content || message;
+    const content = document.createElement("div");
+    content.className = "huahai-chat__message-content";
+    content.textContent = message.content || message;
+    node.append(content);
+    if (kind === "assistant") {
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.className = "huahai-chat__copy";
+      copy.textContent = "复制";
+      copy.addEventListener("click", async () => {
+        if (await copyChatText(content.textContent)) toast("已复制回答", "success");
+        else toast("无法访问剪贴板，请手动选择复制", "error");
+      });
+      node.append(copy);
+    }
     messages.append(node);
     messages.scrollTop = messages.scrollHeight;
     return node;
@@ -244,6 +278,19 @@ export function installChatPanel({ openApiSettings } = {}) {
       if (answer) pending.textContent = answer;
       if (status.status === "completed") {
         pending.className = "huahai-chat__message huahai-chat__message--assistant";
+        pending.replaceChildren();
+        const content = document.createElement("div");
+        content.className = "huahai-chat__message-content";
+        content.textContent = answer;
+        const copy = document.createElement("button");
+        copy.type = "button";
+        copy.className = "huahai-chat__copy";
+        copy.textContent = "复制";
+        copy.addEventListener("click", async () => {
+          if (await copyChatText(content.textContent)) toast("已复制回答", "success");
+          else toast("无法访问剪贴板，请手动选择复制", "error");
+        });
+        pending.append(content, copy);
         appendActionPreview(pending, answer);
         activeRequestId = null;
         await loadSessions();
@@ -334,6 +381,12 @@ export function installChatPanel({ openApiSettings } = {}) {
     if (action === "system") { const box = panel.querySelector(".huahai-chat__system"); box.hidden = !box.hidden; }
   });
   panel.querySelector("form").addEventListener("submit", (event) => { event.preventDefault(); send(); });
+  messageInput.addEventListener("keydown", (event) => {
+    // Preserve Chinese/Japanese IME confirmation and Shift+Enter newlines.
+    if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+    event.preventDefault();
+    send();
+  });
   attachmentInput.addEventListener("change", () => { addAttachments(attachmentInput.files || []); attachmentInput.value = ""; });
   messageInput.addEventListener("paste", (event) => {
     const files = [...(event.clipboardData?.files || [])];
