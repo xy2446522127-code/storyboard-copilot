@@ -18,6 +18,41 @@ function splitModels(value) {
   return [...new Set(String(value || "").split(/[，,\n]/).map((item) => item.trim()).filter(Boolean))];
 }
 
+function legacyProviderRecords() {
+  try {
+    const raw = JSON.parse(localStorage.getItem("storyboard-copilot-settings") || "{}");
+    const state = raw.state && typeof raw.state === "object" ? raw.state : raw;
+    const records = [...(Array.isArray(state.customProviders) ? state.customProviders : []), ...(Array.isArray(state.providers) ? state.providers : [])];
+    const unique = new Map();
+    records.forEach((provider) => {
+      const id = safeText(provider?.id).replace(/[^a-zA-Z0-9_-]/g, "-");
+      const baseUrl = safeText(provider?.baseUrl || provider?.base_url).replace(/\/$/, "");
+      if (!id || !baseUrl || !/^https:\/\//i.test(baseUrl)) return;
+      const existing = unique.get(id) || {};
+      unique.set(id, {
+        id,
+        name: safeText(provider?.name, id),
+        baseUrl,
+        key: safeText(provider?.apiKey || provider?.api_key || existing.key),
+        models: [...new Set([...(existing.models || []), ...(Array.isArray(provider?.models) ? provider.models : []), provider?.modelName]
+          .map((model) => typeof model === "string" ? model : (model?.id || model?.name || ""))
+          .filter((model) => typeof model === "string" && model.trim()))],
+      });
+    });
+    return [...unique.values()];
+  } catch {
+    return [];
+  }
+}
+
+function inferredModelKind(model) {
+  const name = String(model || "").toLowerCase();
+  if (/(video|seedance|sora|wan|kling|veo)/.test(name)) return "video";
+  if (/(audio|speech|tts|voice)/.test(name)) return "audio";
+  if (/(image|dall|flux|sdxl|midjourney|ideogram)/.test(name)) return "image";
+  return "chat";
+}
+
 // Keep a compatible provider record for recovered node pickers. The backend F-drive
 // settings remain authoritative; this mirror only preserves legacy node usability.
 function syncLegacyProvider({ id, name, baseUrl, key, models, kind }) {
@@ -79,6 +114,12 @@ export function installApiSettings() {
     </div>`;
   document.body.append(panel);
 
+  const importLegacy = document.createElement("button");
+  importLegacy.type = "button";
+  importLegacy.className = "huahai-api__import";
+  importLegacy.dataset.action = "import-legacy";
+  importLegacy.textContent = "导入旧版本机配置";
+  panel.querySelector("header > div")?.append(importLegacy);
   const form = panel.querySelector("[data-form]");
   const providersNode = panel.querySelector("[data-providers]");
   const capabilityNode = panel.querySelector("[data-capabilities]");
@@ -141,6 +182,34 @@ export function installApiSettings() {
 
   panel.addEventListener("click", async (event) => {
     const action = event.target.closest("[data-action]")?.dataset.action;
+    if (action === "import-legacy") {
+      const legacy = legacyProviderRecords().filter((provider) => provider.models.length);
+      if (!legacy.length) return toast("没有发现可导入的旧版本机 API 配置。", "info");
+      if (!window.confirm(`将导入 ${legacy.length} 个旧版本机服务商配置到新版 F 盘数据目录。不会联网、不会删除旧配置，也不会显示密钥。是否继续？`)) return;
+      let imported = 0;
+      try {
+        for (const provider of legacy) {
+          await invoke("register_custom_provider", { config: { id: provider.id, name: provider.name, base_url: provider.baseUrl, models: provider.models } });
+          if (provider.key) await invoke("set_api_key", { provider: provider.id, key: provider.key });
+          await invoke("set_base_url", { provider: provider.id, url: provider.baseUrl });
+          const categorized = new Map();
+          provider.models.forEach((model) => {
+            const entry = categorized.get(inferredModelKind(model)) || [];
+            entry.push(model);
+            categorized.set(inferredModelKind(model), entry);
+          });
+          for (const [modelKind, models] of categorized) {
+            await invoke("save_api_model_catalog", { providerId: provider.id, kind: modelKind, models: models.map((id) => ({ id, label: id, capabilities: {} })) });
+          }
+          imported += 1;
+        }
+        await load();
+        toast(`已导入 ${imported} 个旧版本机服务商配置。`, "success");
+      } catch (error) {
+        toast(`导入旧版配置失败：${String(error)}`, "error");
+      }
+      return;
+    }
     if (action === "close") panel.classList.remove("is-open");
     if (action === "new") newProvider();
     if (action === "fetch-models") {
