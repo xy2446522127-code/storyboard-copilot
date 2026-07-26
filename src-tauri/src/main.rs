@@ -626,7 +626,17 @@ fn persistent_data_dir(name: &str) -> std::io::Result<PathBuf> {
     // and WebView entry without routing user data through C:.
     let legacy = PathBuf::from(LEGACY_INSTALL_ROOT).join(name);
     if legacy.exists() {
-        fs::rename(legacy, &target)?;
+        if let Err(error) = fs::rename(&legacy, &target) {
+            // A stale WebView2 child can keep only its profile/cache directory
+            // open after a previous window has closed. The project database must
+            // move successfully, but a locked cache is safe to reuse on F: for
+            // this run; failing the entire application would be worse than a
+            // deferred cache migration. A later fully-closed start retries it.
+            if matches!(name, "webview" | "update-tmp") {
+                return Ok(legacy);
+            }
+            return Err(error);
+        }
     }
     fs::create_dir_all(&target)?;
     Ok(target)
