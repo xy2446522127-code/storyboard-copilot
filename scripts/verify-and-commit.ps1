@@ -19,6 +19,10 @@ if (-not $env:TEMP -or -not (Test-Path $env:TEMP) -or ((Get-PSDrive -Name C).Fre
     $env:TMPDIR = $fTemp
 }
 if (Test-Path 'F:\') {
+    # Cargo's registry, package cache and build output must stay on F: as well.
+    $cargoHome = 'F:\Huahaihuabu\build-cache\cargo-home'
+    New-Item -ItemType Directory -Force -Path $cargoHome | Out-Null
+    $env:CARGO_HOME = $cargoHome
     # npm writes diagnostic logs even for simple package-script invocations.
     # Keep all verification artifacts off a full C: drive.
     $npmCache = 'F:\Huahaihuabu\build-cache\npm'

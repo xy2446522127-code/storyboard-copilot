@@ -21,10 +21,12 @@ if "%HH_VERSION%"=="" (
 )
 rem Keep command-processor build paths ASCII-only.
 set "CARGO_TARGET_DIR=F:\HuahaiBuild\release-%HH_VERSION%"
+set "CARGO_HOME=F:\Huahaihuabu\build-cache\cargo-home"
 set "TEMP=F:\HuahaiBuild\tmp-release-%HH_VERSION%"
 set "TMP=F:\HuahaiBuild\tmp-release-%HH_VERSION%"
 set "TMPDIR=F:\HuahaiBuild\tmp-release-%HH_VERSION%"
 if not exist "%CARGO_TARGET_DIR%" mkdir "%CARGO_TARGET_DIR%"
+if not exist "%CARGO_HOME%" mkdir "%CARGO_HOME%"
 if not exist "%TEMP%" mkdir "%TEMP%"
 set "TAURI_SIGNING_PRIVATE_KEY=%~1"
 if "%~2"=="" (

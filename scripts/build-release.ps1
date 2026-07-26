@@ -9,8 +9,9 @@ $root = Resolve-Path (Join-Path $PSScriptRoot '..')
 $config = Get-Content (Join-Path $root 'src-tauri\tauri.conf.json') -Raw | ConvertFrom-Json
 $build = "F:\HuahaiBuild\release-$($config.version)"
 $temp = "F:\HuahaiBuild\tmp-release-$($config.version)"
-New-Item -ItemType Directory -Force -Path $build,$temp | Out-Null
-$env:CARGO_TARGET_DIR = $build; $env:TEMP = $temp; $env:TMP = $temp; $env:TMPDIR = $temp
+$cargoHome = 'F:\Huahaihuabu\build-cache\cargo-home'
+New-Item -ItemType Directory -Force -Path $build,$temp,$cargoHome | Out-Null
+$env:CARGO_TARGET_DIR = $build; $env:CARGO_HOME = $cargoHome; $env:TEMP = $temp; $env:TMP = $temp; $env:TMPDIR = $temp
 $env:TAURI_SIGNING_PRIVATE_KEY = $PrivateKey
 $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = (Get-Content -LiteralPath $PasswordFile -Raw).Trim()
 Push-Location (Join-Path $root 'src-tauri')
