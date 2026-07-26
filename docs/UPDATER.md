@@ -12,8 +12,8 @@
 
 1. 将 `src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 与 `package.json` 的版本号同步为新的 SemVer 版本；5.8.0 是密钥轮换过渡版，必须手动安装一次。
 2. 在 F 盘准备构建缓存和临时目录，并运行 `scripts/verify-and-commit.ps1`。它会执行 Rust/前端/命令覆盖检查与密钥扫描。
-3. 运行 `scripts/build-release.cmd <私钥文件路径>`。私钥和其 `.password` 文件只能保存在仓库外的安全位置。
-4. 使用 `scripts/make-updater-manifest.mjs` 为同一构建生成 `latest.json`，并将 NSIS 安装包、`.sig` 和 `latest.json` 上传到同一 GitHub Release。
+3. 运行 `scripts/build-release.cmd <私钥文件路径>`。私钥和其 `.password` 文件只能保存在仓库外的安全位置。脚本会将中文安装器副本转换成 `huahai-canvas-<version>-x64-setup.exe` 及同名 `.sig`；只能用这两个 ASCII 文件发布更新。
+4. 使用 `scripts/make-updater-manifest.mjs` 为同一构建生成 `latest.json`，并将 ASCII NSIS 安装包、`.sig` 和 `latest.json` 上传到同一 GitHub Release。
 5. 下载发布后的 `latest.json`，确认版本、下载 URL 和签名正确；在已有版本上执行一次更新回归，确认项目、聊天历史和 API 设置保持可用。
 
 更新失败、断网、磁盘不足或权限不足时，应用应显示可理解的错误，但必须继续保留并启动当前版本。
