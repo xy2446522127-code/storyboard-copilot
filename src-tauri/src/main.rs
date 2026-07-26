@@ -5109,7 +5109,15 @@ fn cancel_image_studio_job(
 fn list_generate_image_jobs(
     app: AppHandle,
     lock: State<StoreLock>,
+    jobs: State<GenerationJobState>,
 ) -> Result<Vec<GenerationJob>, String> {
+    let active_job_ids = jobs
+        .0
+        .lock()
+        .map_err(|_| "generation job state lock poisoned".to_string())?
+        .keys()
+        .cloned()
+        .collect::<HashSet<_>>();
     let _guard = lock
         .0
         .lock()
@@ -5124,8 +5132,28 @@ fn list_generate_image_jobs(
     let rows = statement
         .query_map([], row_to_generation_job)
         .map_err(|error| error.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())
+    let mut jobs = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    for job in &mut jobs {
+        // A remote ID can safely be polled after an application restart.  A
+        // direct request without one cannot: after restart no local worker is
+        // left to receive its HTTP response, so leaving it pending forever is
+        // misleading.  Keep active in-process workers untouched.
+        if job.status == "pending"
+            && job.remote_job_id.is_none()
+            && !active_job_ids.contains(&job.job_id)
+        {
+            job.status = "failed".to_string();
+            job.error = Some(
+                "The app was closed before the provider returned a task ID. Reuse the parameters to try again."
+                    .to_string(),
+            );
+            job.updated_at = Utc::now().to_rfc3339();
+            save_generation_job(&connection, job)?;
+        }
+    }
+    Ok(jobs)
 }
 
 #[tauri::command]
