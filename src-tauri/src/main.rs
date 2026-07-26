@@ -14,6 +14,7 @@ use std::{
     path::PathBuf,
     process::{Command, Stdio},
     sync::Mutex,
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tauri_plugin_updater::UpdaterExt;
@@ -21,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 const PROJECT_HOMEPAGE: &str = "https://github.com/xy2446522127-code/storyboard-copilot";
+const MAX_CHAT_RESPONSE_CHARS: usize = 48_000;
 
 #[derive(Default)]
 struct StoreLock(Mutex<()>);
@@ -34,6 +36,7 @@ struct ChatStreamRecord {
     next_sequence: u64,
     events: Vec<ChatStreamEvent>,
     error: Option<String>,
+    finished_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2274,6 +2277,7 @@ fn finish_chat_stream(
         if let Some(record) = records.get_mut(request_id) {
             record.status = status.to_string();
             record.error = error;
+            record.finished_at = Some(Instant::now());
         }
     }
 }
@@ -2799,25 +2803,47 @@ fn start_chat_stream(
     let messages = chat_api_messages(&app, &history, &user_message, system_prompt, send_originals)?;
     let request_id = Uuid::new_v4().to_string();
     let cancel = CancellationToken::new();
-    streams
+    let mut records = streams
         .0
         .lock()
-        .map_err(|_| "chat stream lock poisoned".to_string())?
-        .insert(
-            request_id.clone(),
-            ChatStreamRecord {
-                cancel: cancel.clone(),
-                status: "streaming".to_string(),
-                next_sequence: 1,
-                events: Vec::new(),
-                error: None,
-            },
-        );
+        .map_err(|_| "chat stream lock poisoned".to_string())?;
+    // Completed streams remain briefly so the UI can collect its final events,
+    // then are discarded on the next request instead of growing without bound.
+    records.retain(|_, record| {
+        record.status == "streaming"
+            || record
+                .finished_at
+                .is_some_and(|finished| finished.elapsed() < Duration::from_secs(600))
+    });
+    records.insert(
+        request_id.clone(),
+        ChatStreamRecord {
+            cancel: cancel.clone(),
+            status: "streaming".to_string(),
+            next_sequence: 1,
+            events: Vec::new(),
+            error: None,
+            finished_at: None,
+        },
+    );
+    drop(records);
     let worker_app = app.clone();
     let worker_request_id = request_id.clone();
     let worker_session_id = session_id.clone();
     tauri::async_runtime::spawn(async move {
-        let request = Client::new()
+        let client = match Client::builder().timeout(Duration::from_secs(120)).build() {
+            Ok(client) => client,
+            Err(error) => {
+                finish_chat_stream(
+                    worker_app.state::<ChatStreamState>().inner(),
+                    &worker_request_id,
+                    "failed",
+                    Some(format!("cannot initialize chat client: {error}")),
+                );
+                return;
+            }
+        };
+        let request = client
             .post(endpoint)
             .bearer_auth(api_key)
             .json(&serde_json::json!({"model": model, "messages": messages, "stream": true}));
@@ -2897,6 +2923,18 @@ fn start_chat_stream(
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(data) {
                     if let Some(delta) = chat_stream_delta(&value).filter(|delta| !delta.is_empty())
                     {
+                        if content.len().saturating_add(delta.len()) > MAX_CHAT_RESPONSE_CHARS {
+                            finish_chat_stream(
+                                worker_app.state::<ChatStreamState>().inner(),
+                                &worker_request_id,
+                                "failed",
+                                Some(
+                                    "chat response exceeded the 48000 character safety limit"
+                                        .to_string(),
+                                ),
+                            );
+                            return;
+                        }
                         content.push_str(&delta);
                         if append_chat_stream_delta(
                             worker_app.state::<ChatStreamState>().inner(),
