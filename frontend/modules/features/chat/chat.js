@@ -99,7 +99,7 @@ export function installChatPanel({ openApiSettings } = {}) {
         <div class="huahai-chat__settings"><select data-field="model" aria-label="对话模型"></select><button type="button" data-action="system">系统提示词</button><button type="button" data-action="retry">重试</button></div>
         <div class="huahai-chat__system" hidden><textarea data-field="system" placeholder="系统提示词仅用于当前会话；请勿填写 API Key 或本地路径。"></textarea></div>
         <div class="huahai-chat__messages" aria-live="polite"></div>
-        <form class="huahai-chat__composer"><textarea data-field="message" placeholder="输入创作需求；默认只发送当前选中节点摘要，不发送原图或全量画布。"></textarea><input data-field="attachments" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/avif" multiple hidden><div class="huahai-chat__attachment-list" data-attachments></div><div class="huahai-chat__composer-actions"><button type="button" data-action="attach">添加图片</button><button type="button" data-action="cancel" disabled>停止</button><button type="submit" data-action="send">发送</button></div><label class="huahai-chat__context"><input type="checkbox" data-field="context" checked> 发送当前选中节点摘要</label><label class="huahai-chat__context"><input type="checkbox" data-field="send-originals"> 本次发送原图（最多 4 张/20 MB）</label></form>
+<form class="huahai-chat__composer"><textarea data-field="message" placeholder="输入创作需求；默认只发送当前选中节点摘要，不发送原图或全量画布。"></textarea><input data-field="attachments" type="file" accept="image/*,video/*,audio/*,.txt,.md,.csv,.json,.pdf,.docx" multiple hidden><div class="huahai-chat__attachment-list" data-attachments></div><div class="huahai-chat__composer-actions"><button type="button" data-action="attach">添加文件</button><button type="button" data-action="cancel" disabled>停止</button><button type="submit" data-action="send">发送</button></div><label class="huahai-chat__context"><input type="checkbox" data-field="context" checked> 发送当前选中节点摘要</label><label class="huahai-chat__context"><input type="checkbox" data-field="send-originals"> 本次发送原图（最多 4 张/20 MB）</label></form>
       </main>
     </div>`;
   document.body.append(panel);
@@ -131,11 +131,11 @@ export function installChatPanel({ openApiSettings } = {}) {
     panel.querySelector('[data-field="send-originals"]').disabled = !attachments.length;
   };
   const addAttachments = (files) => {
-    const candidates = [...files].filter((file) => file.type.startsWith("image/"));
+    const candidates = [...files].filter((file) => file.type.startsWith("image/") || file.type.startsWith("video/") || file.type.startsWith("audio/") || /\.(txt|md|csv|json|pdf|docx)$/i.test(file.name));
     const next = [...attachments, ...candidates].slice(0, 4);
     const total = next.reduce((sum, file) => sum + file.size, 0);
-    if (candidates.length !== files.length) toast("仅支持图片附件。", "error");
-    if (next.length < attachments.length + candidates.length) toast("一次对话最多添加 4 张图片。", "info");
+    if (candidates.length !== files.length) toast("仅支持图片、视频、音频和 TXT/MD/CSV/JSON/PDF/DOCX 文件。", "error");
+    if (next.length < attachments.length + candidates.length) toast("一次对话最多添加 4 个文件。", "info");
     if (total > 20 * 1024 * 1024 || next.some((file) => file.size > 10 * 1024 * 1024)) return toast("每张图片最多 10 MB，附件总量最多 20 MB。", "error");
     attachments = next;
     updateAttachments();
@@ -416,10 +416,10 @@ export function installChatPanel({ openApiSettings } = {}) {
     if (files.length) { event.preventDefault(); addAttachments(files); }
   });
   panel.querySelector(".huahai-chat__composer").addEventListener("dragover", (event) => {
-    if ([...(event.dataTransfer?.files || [])].some((file) => file.type.startsWith("image/"))) event.preventDefault();
+    if ([...(event.dataTransfer?.files || [])].length) event.preventDefault();
   });
   panel.querySelector(".huahai-chat__composer").addEventListener("drop", (event) => {
-    if ([...(event.dataTransfer?.files || [])].some((file) => file.type.startsWith("image/"))) { event.preventDefault(); addAttachments(event.dataTransfer.files); }
+    if ([...(event.dataTransfer?.files || [])].length) { event.preventDefault(); addAttachments(event.dataTransfer.files); }
   });
   updateAttachments();
   return {

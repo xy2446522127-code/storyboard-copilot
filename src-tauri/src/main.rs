@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    io::Write,
+    io::{Cursor, Read, Write},
     path::PathBuf,
     process::{Command, Stdio},
     sync::{Arc, Mutex},
@@ -20,6 +20,7 @@ use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowB
 use tauri_plugin_updater::UpdaterExt;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+use zip::ZipArchive;
 
 const PROJECT_HOMEPAGE: &str = "https://github.com/xy2446522127-code/storyboard-copilot";
 const MAX_CHAT_RESPONSE_CHARS: usize = 48_000;
@@ -532,6 +533,8 @@ struct ChatAttachment {
     path: String,
     mime_type: String,
     size: u64,
+    #[serde(default)]
+    text_excerpt: Option<String>,
 }
 
 /// A chat thread is deliberately kept separate from a project export.  This keeps a
@@ -2492,13 +2495,34 @@ fn prepare_node_image_source(
     )
 }
 
+fn document_text_excerpt(path: &str, file_name: &str) -> Result<Option<String>, String> {
+    const MAX_DOCUMENT_TEXT: usize = 24_000;
+    let extension = file_name.rsplit_once('.').map(|(_, value)| value.to_ascii_lowercase()).unwrap_or_default();
+    let bytes = fs::read(path).map_err(|error| error.to_string())?;
+    let text = match extension.as_str() {
+        "txt" | "md" | "csv" | "json" => String::from_utf8_lossy(&bytes).to_string(),
+        "docx" => {
+            let mut archive = ZipArchive::new(Cursor::new(bytes)).map_err(|_| "DOCX 文件无法读取".to_string())?;
+            let mut document = archive.by_name("word/document.xml").map_err(|_| "DOCX 缺少正文内容".to_string())?;
+            let mut xml = String::new();
+            document.read_to_string(&mut xml).map_err(|_| "DOCX 正文读取失败".to_string())?;
+            xml.replace("</w:p>", "\n").replace("</w:tr>", "\n")
+                .split('<').map(|part| part.split_once('>').map(|(_, value)| value).unwrap_or_default()).collect::<String>()
+        }
+        _ => return Ok(None),
+    };
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() { return Ok(None); }
+    Ok(Some(normalized.chars().take(MAX_DOCUMENT_TEXT).collect()))
+}
+
 #[tauri::command]
 fn prepare_chat_attachments(
     app: AppHandle,
     attachments: Vec<ChatAttachmentInput>,
 ) -> Result<Vec<ChatAttachment>, String> {
     if attachments.is_empty() || attachments.len() > 4 {
-        return Err("attach between 1 and 4 images".to_string());
+        return Err("attach between 1 and 4 files".to_string());
     }
     let mut total = 0_u64;
     let mut prepared = Vec::with_capacity(attachments.len());
@@ -2511,14 +2535,21 @@ fn prepare_chat_attachments(
             .split_once(',')
             .map(|(header, _)| header)
             .unwrap_or_default();
-        if !header.starts_with("data:image/") || !header.ends_with(";base64") {
-            return Err("only image attachments are supported".to_string());
+        if !header.starts_with("data:") || !header.ends_with(";base64") {
+            return Err("attachments must be base64 file data".to_string());
         }
         let mime_type = header
             .strip_prefix("data:")
             .and_then(|value| value.split(';').next())
-            .unwrap_or("image/png")
-            .to_string();
+            .unwrap_or("application/octet-stream")
+            .to_ascii_lowercase();
+        let allowed = mime_type.starts_with("image/")
+            || mime_type.starts_with("video/")
+            || mime_type.starts_with("audio/")
+            || matches!(mime_type.as_str(), "application/pdf" | "application/vnd.openxmlformats-officedocument.wordprocessingml.document" | "text/plain" | "text/markdown" | "text/csv" | "application/json");
+        if !allowed {
+            return Err("unsupported chat attachment type".to_string());
+        }
         let path = persist_media_source(&app, "chat-attachments", attachment.source)?;
         let size = fs::metadata(&path)
             .map_err(|error| error.to_string())?
@@ -2530,15 +2561,21 @@ fn prepare_chat_attachments(
                 "each attachment must be at most 10 MB and the total at most 20 MB".to_string(),
             );
         }
-        if image::open(&path).is_err() {
+        if mime_type.starts_with("image/") && image::open(&path).is_err() {
             let _ = fs::remove_file(&path);
             return Err("attachment is not a readable image".to_string());
         }
+        let text_excerpt = if matches!(mime_type.as_str(), "text/plain" | "text/markdown" | "text/csv" | "application/json" | "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
+            document_text_excerpt(&path, &attachment.file_name)?
+        } else if mime_type == "application/pdf" {
+            Some("[已附加 PDF 文件；当前模型将收到文件名和摘要请求。PDF 正文提取将在后续版本提供。]".to_string())
+        } else { None };
         prepared.push(ChatAttachment {
             file_name: attachment.file_name,
             path,
             mime_type,
             size,
+            text_excerpt,
         });
     }
     Ok(prepared)
@@ -3023,10 +3060,12 @@ fn chat_attachments_from_json(
     let mut total = 0_u64;
     for attachment in &attachments {
         let path = PathBuf::from(&attachment.path);
-        if !path.starts_with(&root)
-            || !path.is_file()
-            || !attachment.mime_type.starts_with("image/")
-        {
+        let supported = attachment.mime_type.starts_with("image/")
+            || attachment.mime_type.starts_with("video/")
+            || attachment.mime_type.starts_with("audio/")
+            || attachment.mime_type.starts_with("text/")
+            || matches!(attachment.mime_type.as_str(), "application/pdf" | "application/json" | "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+        if !path.starts_with(&root) || !path.is_file() || !supported {
             return Err(
                 "chat attachment is no longer available in the local media library".to_string(),
             );
@@ -3058,15 +3097,17 @@ fn chat_user_content(
             user_message.content, user_message.context_json
         )
     };
+    let attachments = chat_attachments_from_json(app, &user_message.attachments_json)?;
+    let document_text = attachments.iter().filter_map(|attachment| attachment.text_excerpt.as_ref().map(|excerpt| format!("\n\n[附件：{}]\n{}", attachment.file_name, excerpt))).collect::<String>();
+    let contextual_content = format!("{contextual_content}{document_text}");
     if !send_originals {
         return Ok(serde_json::Value::String(contextual_content));
     }
-    let attachments = chat_attachments_from_json(app, &user_message.attachments_json)?;
     if attachments.is_empty() {
         return Ok(serde_json::Value::String(contextual_content));
     }
     let mut parts = vec![serde_json::json!({"type":"text", "text": contextual_content})];
-    for attachment in attachments {
+    for attachment in attachments.into_iter().filter(|attachment| attachment.mime_type.starts_with("image/")) {
         let bytes = fs::read(&attachment.path).map_err(|error| error.to_string())?;
         let data_url = format!(
             "data:{};base64,{}",
