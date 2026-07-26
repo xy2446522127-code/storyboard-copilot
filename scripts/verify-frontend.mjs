@@ -63,4 +63,15 @@ if (blankCanvasDrop.includes("window.prompt") || !blankCanvasDrop.includes("save
   throw new Error("Blank-canvas drops must target the just-saved legacy project without an ambiguous project picker.");
 }
 
+const sidebar = readFileSync(resolve(root, "frontend/modules/features/sidebar/sidebar.js"), "utf8");
+if (!sidebar.includes('event.clientX <= 3') || !sidebar.includes('sidebar.addEventListener("pointerleave", close)')) {
+  throw new Error("Sidebar must retain the non-overlay left-edge reveal and immediate pointer-leave close behavior.");
+}
+if (/addEventListener\(["'](?:dragover|drop)["']/.test(sidebar)) {
+  throw new Error("Sidebar must not register drag/drop handlers that could intercept the legacy canvas.");
+}
+if (!sidebar.includes('if (active && !sidebar.contains(document.activeElement))')) {
+  throw new Error("Sidebar must auto-collapse when the recovered canvas mounts, unless keyboard focus is inside it.");
+}
+
 console.log(`Recovered frontend assets, ${scripts.length - 1} modules, and credential scan passed.`);

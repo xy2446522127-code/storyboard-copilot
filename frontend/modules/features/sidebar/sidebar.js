@@ -63,6 +63,13 @@ export function installSidebar({ openChat, openAnnouncements, openApiSettings, o
     if (active === lastCanvasActive) return;
     lastCanvasActive = active;
     document.body.classList.toggle("huahai-canvas-active", active);
+    // A recovered canvas owns the full viewport.  Do not leave the optional
+    // navigation overlay open while that canvas mounts: it can conceal the
+    // first column of nodes before the user has moved the pointer.  Focused
+    // sidebar controls stay open for keyboard users.
+    if (active && !sidebar.contains(document.activeElement)) {
+      document.body.classList.remove("huahai-sidebar-open");
+    }
   };
   const scheduleCanvasStateSync = () => {
     if (canvasSyncQueued) return;
