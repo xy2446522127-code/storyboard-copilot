@@ -156,6 +156,21 @@ mod tests {
     }
 
     #[test]
+    fn video_response_extracts_nested_gateway_result_url_and_status() {
+        let response = serde_json::json!({
+            "data": {
+                "status": "SUCCESS",
+                "result_url": "https://media.example.test/result.mp4"
+            }
+        });
+        assert_eq!(
+            image_result_from_response(&response).as_deref(),
+            Some("https://media.example.test/result.mp4")
+        );
+        assert_eq!(response_status(&response, "pending"), "succeeded");
+    }
+
+    #[test]
     fn image_studio_preserves_all_response_results_without_inline_media() {
         let response = serde_json::json!({"data":[
             {"url":"https://example.test/one.png"},
@@ -809,12 +824,29 @@ fn image_result_from_item(item: &serde_json::Value) -> Option<String> {
 /// `data`.  Keep the legacy single-result helper for old nodes, but retain the
 /// full set for the studio so choosing 2–4 images never silently discards work.
 fn image_results_from_response(value: &serde_json::Value) -> Vec<String> {
-    let items = value
-        .get("data")
-        .and_then(serde_json::Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_else(|| std::slice::from_ref(value));
-    items.iter().filter_map(image_result_from_item).collect()
+    fn collect(value: &serde_json::Value, results: &mut Vec<String>) {
+        if let Some(items) = value.as_array() {
+            for item in items {
+                collect(item, results);
+            }
+            return;
+        }
+        if let Some(result) = image_result_from_item(value) {
+            results.push(result);
+            return;
+        }
+        // Several OpenAI-compatible video gateways return the media reference
+        // inside `data.result_url` or a second `data` envelope.  Recurse only
+        // through the known response envelope rather than scanning arbitrary
+        // strings, so prompts and metadata are never mistaken for media.
+        if let Some(data) = value.get("data") {
+            collect(data, results);
+        }
+    }
+
+    let mut results = Vec::new();
+    collect(value, &mut results);
+    results
 }
 
 fn image_result_from_response(value: &serde_json::Value) -> Option<String> {
@@ -1048,7 +1080,7 @@ fn remote_job_id_from_response(value: &serde_json::Value) -> Option<String> {
 }
 
 fn response_status(value: &serde_json::Value, fallback: &str) -> String {
-    value
+    let status = value
         .get("status")
         .or_else(|| value.get("state"))
         .and_then(serde_json::Value::as_str)
@@ -1056,8 +1088,13 @@ fn response_status(value: &serde_json::Value, fallback: &str) -> String {
             "success" | "completed" | "complete" | "done" => "succeeded".to_string(),
             "error" | "failed" | "cancelled" => "failed".to_string(),
             _ => "pending".to_string(),
-        })
-        .unwrap_or_else(|| fallback.to_string())
+        });
+    status.unwrap_or_else(|| {
+        value
+            .get("data")
+            .map(|data| response_status(data, fallback))
+            .unwrap_or_else(|| fallback.to_string())
+    })
 }
 
 fn provider_credentials(app: &AppHandle, provider_id: &str) -> Result<(String, String), String> {
