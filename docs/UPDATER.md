@@ -15,5 +15,6 @@
 3. 运行 `scripts/build-release.cmd <私钥文件路径>`。私钥和其 `.password` 文件只能保存在仓库外的安全位置。脚本会将中文安装器副本转换成 `huahai-canvas-<version>-x64-setup.exe` 及同名 `.sig`；只能用这两个 ASCII 文件发布更新。
 4. 使用 `scripts/make-updater-manifest.mjs` 为同一构建生成 `latest.json`，并将 ASCII NSIS 安装包、`.sig` 和 `latest.json` 上传到同一 GitHub Release。
 5. 下载发布后的 `latest.json`，确认版本、下载 URL 和签名正确；在已有版本上执行一次更新回归，确认项目、聊天历史和 API 设置保持可用。
+6. 对 F 盘 Release 可执行文件运行 `scripts/test-windows-release.ps1 -Executable <路径>`，确认启动、窗口标题、无终端子进程和 C 盘零产品数据。
 
 更新失败、断网、磁盘不足或权限不足时，应用应显示可理解的错误，但必须继续保留并启动当前版本。
