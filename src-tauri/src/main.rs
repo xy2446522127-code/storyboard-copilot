@@ -156,6 +156,16 @@ mod tests {
     }
 
     #[test]
+    fn provider_model_categories_are_merged_without_duplicates() {
+        let existing = serde_json::json!({"models": ["image-model", "shared-model"]});
+        let incoming = vec![serde_json::json!("chat-model"), serde_json::json!("shared-model")];
+        assert_eq!(
+            merge_provider_models(Some(&existing), &incoming),
+            vec!["image-model", "shared-model", "chat-model"]
+        );
+    }
+
+    #[test]
     fn stopping_local_image_waiting_is_explicit_and_terminal() {
         let mut job = GenerationJob {
             job_id: "job-1".to_string(),
@@ -4225,6 +4235,25 @@ fn load_settings_json(app: AppHandle, lock: State<StoreLock>) -> Result<String, 
     }
 }
 
+fn merge_provider_models(existing: Option<&serde_json::Value>, incoming: &[serde_json::Value]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut merged = Vec::new();
+    let existing_models = existing
+        .and_then(|provider| provider.get("models"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten();
+    for model in existing_models.chain(incoming.iter()) {
+        let Some(model) = model.as_str().map(str::trim).filter(|model| !model.is_empty()) else {
+            continue;
+        };
+        if seen.insert(model.to_string()) {
+            merged.push(model.to_string());
+        }
+    }
+    merged
+}
+
 #[tauri::command]
 fn register_custom_provider(
     app: AppHandle,
@@ -4257,17 +4286,22 @@ fn register_custom_provider(
     if !models.iter().all(|model| model.is_string()) {
         return Err("custom provider models must be strings".to_string());
     }
-    let normalized = serde_json::json!({
-        "id": id,
-        "name": name,
-        "base_url": base_url.trim_end_matches('/'),
-        "models": models,
-    });
     let _guard = lock
         .0
         .lock()
         .map_err(|_| "settings store lock poisoned".to_string())?;
     let mut settings: Settings = read_json(settings_path(&app)?)?;
+    let existing = settings
+        .custom_providers
+        .iter()
+        .find(|provider| provider.get("id").and_then(serde_json::Value::as_str) == Some(id));
+    let merged_models = merge_provider_models(existing, models);
+    let normalized = serde_json::json!({
+        "id": id,
+        "name": name,
+        "base_url": base_url.trim_end_matches('/'),
+        "models": merged_models,
+    });
     settings
         .custom_providers
         .retain(|provider| provider.get("id").and_then(serde_json::Value::as_str) != Some(id));
