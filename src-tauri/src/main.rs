@@ -135,6 +135,20 @@ mod tests {
     }
 
     #[test]
+    fn image_job_metadata_keeps_retry_fields_without_media_payloads() {
+        let metadata = image_job_request_metadata(&serde_json::json!({
+            "provider_id": "provider-a",
+            "model": "image-model",
+            "prompt": "a flower sea",
+            "reference_images": [{"image_url": "data:image/png;base64,private-media"}],
+        }));
+        assert!(metadata.contains("provider-a"));
+        assert!(metadata.contains("referenceCount"));
+        assert!(!metadata.contains("data:image"));
+        assert!(!metadata.contains("private-media"));
+    }
+
+    #[test]
     fn only_f_drive_paths_are_accepted_for_user_output() {
         assert!(is_f_drive_path(std::path::Path::new(
             r"F:\花海画布\exports"
@@ -215,6 +229,7 @@ struct GenerationJob {
     result: Option<String>,
     error: Option<String>,
     remote_job_id: Option<String>,
+    request_json: String,
     updated_at: String,
 }
 
@@ -434,6 +449,25 @@ fn remote_model_count(value: &serde_json::Value) -> usize {
         .or_else(|| value.get("models"))
         .and_then(serde_json::Value::as_array)
         .map_or(0, Vec::len)
+}
+
+fn image_job_request_metadata(request: &serde_json::Value) -> String {
+    let references = request
+        .get("reference_images")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    serde_json::json!({
+        "providerId": request.get("provider_id").and_then(serde_json::Value::as_str).unwrap_or_default(),
+        "model": request.get("model").and_then(serde_json::Value::as_str).unwrap_or_default(),
+        "prompt": request.get("prompt").and_then(serde_json::Value::as_str).unwrap_or_default().chars().take(8000).collect::<String>(),
+        "negativePrompt": request.get("negative_prompt").and_then(serde_json::Value::as_str).unwrap_or_default().chars().take(4000).collect::<String>(),
+        "size": request.get("size").and_then(serde_json::Value::as_str).unwrap_or_default(),
+        "quality": request.get("quality").and_then(serde_json::Value::as_str).unwrap_or_default(),
+        "count": request.get("n").and_then(serde_json::Value::as_u64).unwrap_or(1).min(4),
+        "seed": request.get("seed").and_then(serde_json::Value::as_i64),
+        "referenceCount": references
+    })
+    .to_string()
 }
 
 /// Generation providers commonly return either a temporary HTTPS URL or an
@@ -978,6 +1012,7 @@ fn open_projects(app: &AppHandle) -> Result<Connection, String> {
                 result TEXT,
                 error TEXT,
                 remote_job_id TEXT,
+                request_json TEXT NOT NULL DEFAULT '{}',
                 updated_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_generation_jobs_updated_at ON generation_jobs(updated_at DESC);
@@ -1039,6 +1074,10 @@ fn open_projects(app: &AppHandle) -> Result<Connection, String> {
     );
     let _ = connection.execute(
         "ALTER TABLE chat_messages ADD COLUMN status TEXT NOT NULL DEFAULT 'complete'",
+        [],
+    );
+    let _ = connection.execute(
+        "ALTER TABLE generation_jobs ADD COLUMN request_json TEXT NOT NULL DEFAULT '{}'",
         [],
     );
 
@@ -1185,6 +1224,7 @@ fn row_to_generation_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<Generation
         result: row.get("result")?,
         error: row.get("error")?,
         remote_job_id: row.get("remote_job_id")?,
+        request_json: row.get("request_json")?,
         updated_at: row.get("updated_at")?,
     })
 }
@@ -1193,11 +1233,12 @@ fn save_generation_job(connection: &Connection, job: &GenerationJob) -> Result<(
     connection
         .execute(
             "INSERT INTO generation_jobs
-             (job_id, provider_id, kind, status, progress, result, error, remote_job_id, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             (job_id, provider_id, kind, status, progress, result, error, remote_job_id, request_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(job_id) DO UPDATE SET
                status = excluded.status, progress = excluded.progress, result = excluded.result,
-               error = excluded.error, remote_job_id = excluded.remote_job_id, updated_at = excluded.updated_at",
+               error = excluded.error, remote_job_id = excluded.remote_job_id,
+               request_json = excluded.request_json, updated_at = excluded.updated_at",
             params![
                 &job.job_id,
                 &job.provider_id,
@@ -1207,6 +1248,7 @@ fn save_generation_job(connection: &Connection, job: &GenerationJob) -> Result<(
                 &job.result,
                 &job.error,
                 &job.remote_job_id,
+                &job.request_json,
                 &job.updated_at,
             ],
         )
@@ -1220,7 +1262,7 @@ fn get_generation_job(
 ) -> Result<Option<GenerationJob>, String> {
     connection
         .query_row(
-            "SELECT job_id, provider_id, kind, status, progress, result, error, remote_job_id, updated_at
+            "SELECT job_id, provider_id, kind, status, progress, result, error, remote_job_id, request_json, updated_at
              FROM generation_jobs WHERE job_id = ?1",
             [job_id],
             row_to_generation_job,
@@ -4734,6 +4776,7 @@ async fn submit_generate_image_job(
         .filter(|value| !value.is_empty())
         .ok_or("image request is missing provider_id")?
         .to_string();
+    let request_json = image_job_request_metadata(&request);
     let (base_url, api_key) = provider_credentials(&app, &provider_id)?;
     let mut job = GenerationJob {
         job_id: Uuid::new_v4().to_string(),
@@ -4744,6 +4787,7 @@ async fn submit_generate_image_job(
         result: None,
         error: None,
         remote_job_id: None,
+        request_json,
         updated_at: Utc::now().to_rfc3339(),
     };
     {
@@ -4829,7 +4873,7 @@ fn list_generate_image_jobs(
     let connection = open_projects(&app)?;
     let mut statement = connection
         .prepare(
-            "SELECT job_id, provider_id, kind, status, progress, result, error, remote_job_id, updated_at
+            "SELECT job_id, provider_id, kind, status, progress, result, error, remote_job_id, request_json, updated_at
              FROM generation_jobs WHERE kind = 'image' ORDER BY updated_at DESC LIMIT 50",
         )
         .map_err(|error| error.to_string())?;
@@ -5022,6 +5066,7 @@ async fn submit_generate_video_job(
         result: None,
         error: None,
         remote_job_id: None,
+        request_json: "{}".to_string(),
         updated_at: Utc::now().to_rfc3339(),
     };
     {

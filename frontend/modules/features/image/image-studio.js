@@ -60,6 +60,32 @@ export function installImageStudio({ openApiSettings } = {}) {
   let presets = loadPresets();
 
   const field = (name) => form.querySelector(`[data-field="${name}"]`);
+  const retryPayloadFromMetadata = (metadata) => {
+    if (!metadata || metadata.referenceCount || !metadata.providerId || !metadata.model || !metadata.prompt) return null;
+    return {
+      provider_id: metadata.providerId,
+      model: metadata.model,
+      prompt: metadata.prompt,
+      negative_prompt: metadata.negativePrompt || undefined,
+      size: metadata.size || undefined,
+      quality: metadata.quality || undefined,
+      n: Math.max(1, Math.min(4, Number(metadata.count) || 1)),
+      seed: Number.isFinite(Number(metadata.seed)) ? Number(metadata.seed) : undefined,
+      reference_images: [],
+    };
+  };
+  const restoreJobParameters = (job) => {
+    const metadata = job.metadata;
+    if (!metadata) return toast("这个历史任务没有可复用的参数。", "info");
+    field("prompt").value = metadata.prompt || "";
+    field("negative").value = metadata.negativePrompt || "";
+    field("count").value = String(Math.max(1, Math.min(4, Number(metadata.count) || 1)));
+    field("seed").value = metadata.seed ?? "";
+    const option = [...modelsNode.options].find((item) => item.value === `${metadata.providerId}::${metadata.model}`);
+    if (option) modelsNode.value = option.value;
+    renderCapabilities();
+    toast(metadata.referenceCount ? "已复用参数；请重新添加参考图后生成。" : "已复用参数，可确认后重新生成。", "success");
+  };
   const selectedModel = () => models.find((model) => `${model.providerId}::${model.id}` === modelsNode.value);
   const supports = (capability) => Boolean(selectedModel()?.capabilities?.[capability]);
   const renderRefs = () => {
@@ -145,6 +171,14 @@ export function installImageStudio({ openApiSettings } = {}) {
         const asset = document.createElement("button"); asset.type = "button"; asset.textContent = "加入素材库"; asset.addEventListener("click", () => saveToAssets(job));
         const canvas = document.createElement("button"); canvas.type = "button"; canvas.textContent = "加入项目画布"; canvas.addEventListener("click", () => addToCanvas(job));
         actions.append(asset, canvas); card.append(actions);
+      } else if (job.status === "failed" && job.payload) {
+        const actions = document.createElement("div"); actions.className = "huahai-image__job-actions";
+        const retry = document.createElement("button"); retry.type = "button"; retry.textContent = "重试生成"; retry.addEventListener("click", () => retryJob(job));
+        actions.append(retry); card.append(actions);
+      } else if (job.status === "failed") {
+        const actions = document.createElement("div"); actions.className = "huahai-image__job-actions";
+        const reuse = document.createElement("button"); reuse.type = "button"; reuse.textContent = "复用参数"; reuse.addEventListener("click", () => restoreJobParameters(job));
+        actions.append(reuse); card.append(actions);
       }
       return card;
     }));
@@ -179,9 +213,35 @@ export function installImageStudio({ openApiSettings } = {}) {
       if (latest.status === "pending") window.setTimeout(() => poll(job), 2200);
     } catch (error) { job.status = "failed"; job.error = String(error); renderJobs(); }
   };
+  const runJob = async ({ payload, prompt, modelLabel }) => {
+    const job = { id: "", status: "pending", prompt, modelLabel, result: "", error: "", payload };
+    jobs.unshift(job); renderJobs();
+    try {
+      job.id = await invoke("submit_generate_image_job", { payload: JSON.stringify(payload) });
+      await poll(job);
+    } catch (error) { job.status = "failed"; job.error = String(error); renderJobs(); }
+  };
+  const retryJob = async (job) => {
+    if (!job.payload) return toast("重启后请重新填写参数和参考图再生成。", "info");
+    if (!window.confirm(`将再次使用 ${job.modelLabel} 生成图片。该请求可能产生费用，是否继续？`)) return;
+    await runJob({ payload: job.payload, prompt: job.prompt, modelLabel: job.modelLabel });
+  };
   const loadJobs = async () => {
     const stored = await invoke("list_generate_image_jobs");
-    jobs = stored.map((job) => ({ id: job.jobId, status: job.status, prompt: "已保存的生成任务", modelLabel: job.providerId, result: job.result || "", error: job.error || "" }));
+    jobs = stored.map((job) => {
+      let metadata = null;
+      try { metadata = JSON.parse(job.requestJson || "{}"); } catch { /* Older records have no request metadata. */ }
+      return {
+        id: job.jobId,
+        status: job.status,
+        prompt: metadata?.prompt || "已保存的生成任务",
+        modelLabel: metadata?.model || job.providerId,
+        result: job.result || "",
+        error: job.error || "",
+        metadata,
+        payload: retryPayloadFromMetadata(metadata),
+      };
+    });
     renderJobs();
     jobs.filter((job) => job.status === "pending").forEach((job) => poll(job));
   };
@@ -205,14 +265,11 @@ export function installImageStudio({ openApiSettings } = {}) {
     }
     const count = Number(field("count").value || 1);
     if (!window.confirm(`将使用 ${model.label || model.id} 生成 ${count} 张图片。该请求可能产生费用，是否继续？`)) return;
-    const job = { id: "", status: "pending", prompt, modelLabel: model.label || model.id, result: "", error: "" };
-    jobs.unshift(job); renderJobs();
     try {
       const references = (supports("multiReference") ? refs : refs.slice(0, 1)).map((ref) => ({ image_url: ref.dataUrl }));
       const payload = { provider_id: model.providerId, model: model.id, prompt, negative_prompt: supports("negativePrompt") ? safeText(field("negative").value) : undefined, size, quality: resolution === "custom" ? undefined : resolution, n: count, seed: supports("seed") && field("seed").value ? Number(field("seed").value) : undefined, reference_images: references };
-      job.id = await invoke("submit_generate_image_job", { payload: JSON.stringify(payload) });
-      await poll(job);
-    } catch (error) { job.status = "failed"; job.error = String(error); renderJobs(); }
+      await runJob({ payload, prompt, modelLabel: model.label || model.id });
+    } catch (error) { toast(`无法创建生图任务：${String(error)}`, "error"); }
   };
   const addFiles = async (files) => {
     for (const file of [...files]) {

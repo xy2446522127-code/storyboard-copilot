@@ -17,6 +17,13 @@ if (-not $env:TEMP -or -not (Test-Path $env:TEMP) -or ((Get-PSDrive -Name C).Fre
     $env:TEMP = $fallbackTemp
     $env:TMP = $fallbackTemp
 }
+if (Test-Path 'F:\') {
+    # npm writes diagnostic logs even for simple package-script invocations.
+    # Keep verification artifacts off a full C: drive as well.
+    $npmCache = 'F:\Huahaihuabu\花海画布\build-cache\npm'
+    New-Item -ItemType Directory -Force -Path $npmCache | Out-Null
+    $env:NPM_CONFIG_CACHE = $npmCache
+}
 Push-Location $repo
 try {
     & (Join-Path $PSScriptRoot 'cargo-check.cmd')
