@@ -110,6 +110,10 @@ mod tests {
             r#"{"image":"data:image/png;base64,AAAA"}"#.to_string()
         ))
         .is_err());
+        assert!(sanitize_chat_context(Some(
+            r#"{"selectedNodes":[{"mediaReference":"F:\\Huahaihuabu\\花海画布\\data\\media\\secret.png"}]}"#.to_string()
+        ))
+        .is_err());
     }
 
     #[test]
@@ -2284,8 +2288,22 @@ fn sanitize_chat_context(context_json: Option<String>) -> Result<String, String>
     // A data URI would transfer the original image/audio/video.  The chat design only
     // sends node metadata and a local media reference unless the UI adds an explicit,
     // separately confirmed attachment feature.
-    if raw.contains("data:image/") || raw.contains("data:video/") || raw.contains("data:audio/") {
-        return Err("raw media must be attached through an explicit confirmation flow".to_string());
+    let raw_lower = raw.to_ascii_lowercase();
+    let has_windows_path = raw.as_bytes().windows(3).any(|bytes| {
+        bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && (bytes[2] == b'\\' || bytes[2] == b'/')
+    });
+    if raw_lower.contains("data:image/")
+        || raw_lower.contains("data:video/")
+        || raw_lower.contains("data:audio/")
+        || raw_lower.contains("file://")
+        || has_windows_path
+    {
+        return Err(
+            "raw media and local paths must be attached through an explicit confirmation flow"
+                .to_string(),
+        );
     }
     serde_json::to_string(&value).map_err(|error| error.to_string())
 }

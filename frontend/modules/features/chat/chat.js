@@ -7,7 +7,9 @@ function nodeContext() {
       id: node.dataset.id || node.id || "",
       type: node.dataset.type || node.className,
       text: (node.innerText || "").slice(0, 180),
-      mediaReference: node.querySelector("img,video")?.getAttribute("src")?.replace(/^data:.*$/, "[本地媒体已隐藏]") || undefined,
+      // Context must never disclose the user's F-drive path or a data URL. The
+      // actual original is attached only through the explicit per-message toggle.
+      mediaReference: node.querySelector("img,video") ? "[已选媒体：原图未发送]" : undefined,
     })),
   } : {};
 }
@@ -84,7 +86,22 @@ export function installChatPanel({ openApiSettings } = {}) {
       const row = document.createElement("div");
       row.className = "huahai-chat__session";
       row.classList.toggle("is-active", item.id === session?.id);
-      row.innerHTML = `<button type="button" data-session="${item.id}" title="${item.title}">${item.title}</button><button type="button" data-rename="${item.id}" title="重命名">✎</button><button type="button" data-delete="${item.id}" title="删除会话">×</button>`;
+      const open = document.createElement("button");
+      open.type = "button";
+      open.dataset.session = item.id;
+      open.title = item.title;
+      open.textContent = item.title;
+      const rename = document.createElement("button");
+      rename.type = "button";
+      rename.dataset.rename = item.id;
+      rename.title = "重命名";
+      rename.textContent = "✎";
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.dataset.delete = item.id;
+      remove.title = "删除会话";
+      remove.textContent = "×";
+      row.append(open, rename, remove);
       return row;
     }));
   };
