@@ -6,30 +6,30 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repo = Resolve-Path (Join-Path $PSScriptRoot '..')
-$fallbackBuildRoot = 'F:\Huahaihuabu\花海画布\build-cache\verified-commits'
+$fBuildRoot = 'F:\Huahaihuabu\build-cache\verified-commits'
 if (-not $env:CARGO_TARGET_DIR -and (Test-Path 'F:\')) {
-    New-Item -ItemType Directory -Force -Path $fallbackBuildRoot | Out-Null
-    $env:CARGO_TARGET_DIR = $fallbackBuildRoot
+    New-Item -ItemType Directory -Force -Path $fBuildRoot | Out-Null
+    $env:CARGO_TARGET_DIR = $fBuildRoot
 }
 if (-not $env:TEMP -or -not (Test-Path $env:TEMP) -or ((Get-PSDrive -Name C).Free -eq 0)) {
-    $fallbackTemp = 'F:\Huahaihuabu\花海画布\build-tmp\verified-commits'
-    New-Item -ItemType Directory -Force -Path $fallbackTemp | Out-Null
-    $env:TEMP = $fallbackTemp
-    $env:TMP = $fallbackTemp
-    $env:TMPDIR = $fallbackTemp
+    $fTemp = 'F:\Huahaihuabu\build-tmp\verified-commits'
+    New-Item -ItemType Directory -Force -Path $fTemp | Out-Null
+    $env:TEMP = $fTemp
+    $env:TMP = $fTemp
+    $env:TMPDIR = $fTemp
 }
 if (Test-Path 'F:\') {
     # npm writes diagnostic logs even for simple package-script invocations.
-    # Keep verification artifacts off a full C: drive as well.
-    $npmCache = 'F:\Huahaihuabu\花海画布\build-cache\npm'
+    # Keep all verification artifacts off a full C: drive.
+    $npmCache = 'F:\Huahaihuabu\build-cache\npm'
     New-Item -ItemType Directory -Force -Path $npmCache | Out-Null
     $env:NPM_CONFIG_CACHE = $npmCache
 }
 if (-not $env:GIT_DIR -and (Test-Path 'F:\') -and ((Get-PSDrive -Name C).Free -eq 0)) {
     # The source checkout may live on C:, but a commit also needs object and ref
-    # locks, not just an index lock. Keep complete Git metadata on F: so verified
-    # commits and pushes never need to write to a full C: drive.
-    $alternateGitDir = 'F:\Huahaihuabu\花海画布\build-cache\git-metadata'
+    # locks. Keep complete Git metadata on F: so verified commits and pushes
+    # never need to write to a full C: drive.
+    $alternateGitDir = 'F:\Huahaihuabu\build-cache\git-metadata'
     if (-not (Test-Path (Join-Path $alternateGitDir 'HEAD'))) {
         Copy-Item -LiteralPath (Join-Path $repo '.git') -Destination $alternateGitDir -Recurse -Force
     }
