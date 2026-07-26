@@ -42,7 +42,7 @@ export function installImageStudio({ openApiSettings } = {}) {
           <label>正向提示词<textarea data-field="prompt" required placeholder="描述你想生成或编辑的画面…"></textarea></label>
           <label data-negative>负面提示词<textarea data-field="negative" placeholder="不希望出现的内容（模型支持时生效）"></textarea></label>
           <div class="huahai-image__references"><div><span>参考图</span><small>最多 4 张；每张不超过 10 MB</small></div><div data-ref-list></div><input data-field="files" type="file" accept="image/*" multiple hidden /><button type="button" data-action="pick-refs">添加参考图</button></div>
-          <div class="huahai-image__grid"><label>模型<select data-field="model"></select></label><label>比例<select data-field="ratio"><option>1:1</option><option>2:3</option><option>3:2</option><option>3:4</option><option>4:3</option><option>9:16</option><option>16:9</option></select></label><label data-size>分辨率<select data-field="resolution"><option value="1k">1K</option><option value="2k">2K</option><option value="4k">4K</option><option value="custom">自定义</option></select></label><label data-count>数量<select data-field="count"><option value="1">1 张</option><option value="2">2 张</option><option value="3">3 张</option><option value="4">4 张</option></select></label><label data-seed>随机种子<input data-field="seed" type="number" placeholder="留空随机" /></label></div>
+          <div class="huahai-image__grid"><label>模型<select data-field="model"></select></label><label>比例<select data-field="ratio"><option>1:1</option><option>2:3</option><option>3:2</option><option>3:4</option><option>4:3</option><option>9:16</option><option>16:9</option></select></label><label data-size>分辨率<select data-field="resolution"><option value="1k">1K</option><option value="2k">2K</option><option value="4k">4K</option><option value="custom">自定义</option></select></label><label data-custom-width hidden>宽度（256–4096，64 的倍数）<input data-field="custom-width" type="number" min="256" max="4096" step="64" value="1024" /></label><label data-custom-height hidden>高度（256–4096，64 的倍数）<input data-field="custom-height" type="number" min="256" max="4096" step="64" value="1024" /></label><label data-count>数量<select data-field="count"><option value="1">1 张</option><option value="2">2 张</option><option value="3">3 张</option><option value="4">4 张</option></select></label><label data-seed>随机种子<input data-field="seed" type="number" placeholder="留空随机" /></label></div>
           <div class="huahai-image__actions"><button type="button" data-action="clear">清空</button><button class="primary" type="submit">生成图片</button></div>
         </form>
         <aside><div class="huahai-image__jobs-head"><strong>任务与结果</strong><button type="button" data-action="clear-results">清空显示</button></div><div data-jobs><p>创建任务后，状态和结果会显示在这里。</p></div></aside>
@@ -107,6 +107,10 @@ export function installImageStudio({ openApiSettings } = {}) {
     panel.querySelector("[data-negative]").hidden = hasModel && !supports("negativePrompt");
     panel.querySelector("[data-size]").hidden = hasModel && !supports("customSize");
     panel.querySelector("[data-seed]").hidden = hasModel && !supports("seed");
+    if (hasModel && !supports("customSize") && field("resolution").value === "custom") field("resolution").value = "1k";
+    const custom = field("resolution").value === "custom" && (!hasModel || supports("customSize"));
+    panel.querySelector("[data-custom-width]").hidden = !custom;
+    panel.querySelector("[data-custom-height]").hidden = !custom;
     panel.querySelector("[data-model-hint]").textContent = !hasModel ? "请先在 API 设置配置图像模型" : (supports("multiReference") ? "支持多参考图" : "此模型仅支持第一张参考图");
   };
   const renderModels = async () => {
@@ -181,14 +185,23 @@ export function installImageStudio({ openApiSettings } = {}) {
     if (refs.length > 1 && !supports("multiReference")) {
       if (!window.confirm("该模型不支持多参考图。继续将只发送第一张参考图吗？")) return;
     }
+    const resolution = field("resolution").value;
+    let size = dimensionsForRatio(field("ratio").value, resolution);
+    if (resolution === "custom") {
+      const width = Number(field("custom-width").value);
+      const height = Number(field("custom-height").value);
+      if (![width, height].every((value) => Number.isInteger(value) && value >= 256 && value <= 4096 && value % 64 === 0)) {
+        return toast("自定义宽高须在 256–4096 之间，且为 64 的倍数。", "error");
+      }
+      size = `${width}x${height}`;
+    }
     const count = Number(field("count").value || 1);
     if (!window.confirm(`将使用 ${model.label || model.id} 生成 ${count} 张图片。该请求可能产生费用，是否继续？`)) return;
     const job = { id: "", status: "pending", prompt, modelLabel: model.label || model.id, result: "", error: "" };
     jobs.unshift(job); renderJobs();
     try {
       const references = (supports("multiReference") ? refs : refs.slice(0, 1)).map((ref) => ({ image_url: ref.dataUrl }));
-      const resolution = field("resolution").value;
-      const payload = { provider_id: model.providerId, model: model.id, prompt, negative_prompt: supports("negativePrompt") ? safeText(field("negative").value) : undefined, size: dimensionsForRatio(field("ratio").value, resolution), quality: resolution, n: count, seed: supports("seed") && field("seed").value ? Number(field("seed").value) : undefined, reference_images: references };
+      const payload = { provider_id: model.providerId, model: model.id, prompt, negative_prompt: supports("negativePrompt") ? safeText(field("negative").value) : undefined, size, quality: resolution === "custom" ? undefined : resolution, n: count, seed: supports("seed") && field("seed").value ? Number(field("seed").value) : undefined, reference_images: references };
       job.id = await invoke("submit_generate_image_job", { payload: JSON.stringify(payload) });
       await poll(job);
     } catch (error) { job.status = "failed"; job.error = String(error); renderJobs(); }
@@ -222,6 +235,7 @@ export function installImageStudio({ openApiSettings } = {}) {
   });
   filesNode.addEventListener("change", () => addFiles(filesNode.files));
   modelsNode.addEventListener("change", renderCapabilities);
+  field("resolution").addEventListener("change", renderCapabilities);
   form.addEventListener("dragover", (event) => { if ([...event.dataTransfer?.items || []].some((item) => item.kind === "file")) event.preventDefault(); });
   form.addEventListener("drop", (event) => { if (event.dataTransfer?.files?.length) { event.preventDefault(); addFiles(event.dataTransfer.files); } });
   form.addEventListener("submit", (event) => { event.preventDefault(); submit(); });
