@@ -119,6 +119,15 @@ mod tests {
     }
 
     #[test]
+    fn image_response_extracts_inline_payload_for_f_drive_persistence() {
+        let response = serde_json::json!({"data":[{"b64_json":"QUJDRA=="}]});
+        assert_eq!(
+            image_result_from_response(&response).as_deref(),
+            Some("data:image/png;base64,QUJDRA==")
+        );
+    }
+
+    #[test]
     fn connected_arrangement_respects_edges_and_keeps_sibling_order_stable() {
         let stable = vec![
             "image-b".to_string(),
@@ -389,6 +398,21 @@ fn image_result_from_response(value: &serde_json::Value) -> Option<String> {
     item.get("b64_json")
         .and_then(serde_json::Value::as_str)
         .map(|encoded| format!("data:image/png;base64,{encoded}"))
+}
+
+/// Generation providers commonly return either a temporary HTTPS URL or an
+/// inline `b64_json` payload.  The latter must never be kept in SQLite: it can
+/// turn a single image task into tens of megabytes of database text and makes
+/// project startup progressively slower.  Persist bytes immediately under the
+/// F-drive app media directory; HTTPS URLs remain controlled references.
+fn persist_generated_image_result(
+    app: &AppHandle,
+    source: Option<String>,
+) -> Result<Option<String>, String> {
+    source
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| persist_media_source(app, "generated-images", value))
+        .transpose()
 }
 
 fn remote_job_id_from_response(value: &serde_json::Value) -> Option<String> {
@@ -4608,18 +4632,26 @@ async fn submit_generate_image_job(
             } else {
                 let value: serde_json::Value = serde_json::from_str(&body)
                     .map_err(|error| format!("图片生成响应不是 JSON: {error}"))?;
-                job.result = image_result_from_response(&value);
                 job.remote_job_id = remote_job_id_from_response(&value);
-                job.status = if job.result.is_some() {
-                    "succeeded".to_string()
-                } else {
-                    response_status(&value, "pending")
-                };
-                job.progress = if job.status == "succeeded" { 100 } else { 0 };
-                job.error = value
-                    .get("error")
-                    .and_then(serde_json::Value::as_str)
-                    .map(ToOwned::to_owned);
+                match persist_generated_image_result(&app, image_result_from_response(&value)) {
+                    Ok(result) => {
+                        job.result = result;
+                        job.status = if job.result.is_some() {
+                            "succeeded".to_string()
+                        } else {
+                            response_status(&value, "pending")
+                        };
+                        job.progress = if job.status == "succeeded" { 100 } else { 0 };
+                        job.error = value
+                            .get("error")
+                            .and_then(serde_json::Value::as_str)
+                            .map(ToOwned::to_owned);
+                    }
+                    Err(error) => {
+                        job.status = "failed".to_string();
+                        job.error = Some(format!("保存生成图片失败: {error}"));
+                    }
+                }
             }
         }
         Err(error) => {
@@ -4702,21 +4734,29 @@ async fn get_generate_image_job(
                 .json()
                 .await
                 .map_err(|error| format!("生成任务响应不是 JSON: {error}"))?;
-            job.result = image_result_from_response(&value).or(job.result);
-            job.status = if job.result.is_some() {
-                "succeeded".to_string()
-            } else {
-                response_status(&value, "pending")
-            };
-            job.progress = value
-                .get("progress")
-                .and_then(serde_json::Value::as_u64)
-                .map(|value| value.min(100) as u8)
-                .unwrap_or(if job.status == "succeeded" { 100 } else { 0 });
-            job.error = value
-                .get("error")
-                .and_then(serde_json::Value::as_str)
-                .map(ToOwned::to_owned);
+            match persist_generated_image_result(&app, image_result_from_response(&value)) {
+                Ok(remote_result) => {
+                    job.result = remote_result.or(job.result);
+                    job.status = if job.result.is_some() {
+                        "succeeded".to_string()
+                    } else {
+                        response_status(&value, "pending")
+                    };
+                    job.progress = value
+                        .get("progress")
+                        .and_then(serde_json::Value::as_u64)
+                        .map(|value| value.min(100) as u8)
+                        .unwrap_or(if job.status == "succeeded" { 100 } else { 0 });
+                    job.error = value
+                        .get("error")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned);
+                }
+                Err(error) => {
+                    job.status = "failed".to_string();
+                    job.error = Some(format!("保存生成图片失败: {error}"));
+                }
+            }
         }
         Ok(response) => {
             job.status = "failed".to_string();
