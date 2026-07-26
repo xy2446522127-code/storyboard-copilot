@@ -105,6 +105,17 @@ struct GenerationJob {
     updated_at: String,
 }
 
+/// An image that the optional blank-canvas drop plugin has already read in the
+/// WebView.  It is intentionally limited to image data URLs: accepting an
+/// arbitrary path here would turn a convenient canvas action into a file read
+/// API.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BlankCanvasImageInput {
+    source: String,
+    file_name: String,
+}
+
 /// A chat thread is deliberately kept separate from a project export.  This keeps a
 /// shared `.storyboard` file portable and makes it impossible for an export to include
 /// the local API settings that are used to talk to a model.
@@ -228,7 +239,8 @@ fn service_endpoint(app: &AppHandle, path: &str) -> Result<Url, String> {
         .or_else(|| settings.base_urls.get("huahai_service").cloned())
         .filter(|value| !value.trim().is_empty())
         .ok_or("The Huahai service address is not configured. Configure it in API settings before using accounts or credits.".to_string())?;
-    let base = Url::parse(base_url.trim()).map_err(|error| format!("invalid service endpoint: {error}"))?;
+    let base = Url::parse(base_url.trim())
+        .map_err(|error| format!("invalid service endpoint: {error}"))?;
     if !matches!(base.scheme(), "http" | "https") {
         return Err("service base URL must use HTTP or HTTPS".to_string());
     }
@@ -379,7 +391,9 @@ fn model_kind_is_valid(kind: &str) -> bool {
     matches!(kind, "image" | "chat" | "video" | "audio")
 }
 
-fn normalized_catalog_models(models: &[serde_json::Value]) -> Result<Vec<serde_json::Value>, String> {
+fn normalized_catalog_models(
+    models: &[serde_json::Value],
+) -> Result<Vec<serde_json::Value>, String> {
     let mut normalized = Vec::new();
     for model in models {
         let id = model
@@ -394,11 +408,15 @@ fn normalized_catalog_models(models: &[serde_json::Value]) -> Result<Vec<serde_j
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .unwrap_or(id);
-        let capabilities = model.get("capabilities").cloned().unwrap_or_else(|| serde_json::json!({}));
+        let capabilities = model
+            .get("capabilities")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
         if !capabilities.is_object() {
             return Err("model capabilities must be an object".to_string());
         }
-        normalized.push(serde_json::json!({"id": id, "label": label, "capabilities": capabilities}));
+        normalized
+            .push(serde_json::json!({"id": id, "label": label, "capabilities": capabilities}));
     }
     normalized.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
     normalized.dedup_by(|left, right| left["id"] == right["id"]);
@@ -843,9 +861,18 @@ fn open_projects(app: &AppHandle) -> Result<Connection, String> {
         )
         .map_err(|error| error.to_string())?;
     // Additive migrations keep every existing local chat readable.
-    let _ = connection.execute("ALTER TABLE chat_sessions ADD COLUMN provider_id TEXT NOT NULL DEFAULT ''", []);
-    let _ = connection.execute("ALTER TABLE chat_messages ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'", []);
-    let _ = connection.execute("ALTER TABLE chat_messages ADD COLUMN status TEXT NOT NULL DEFAULT 'complete'", []);
+    let _ = connection.execute(
+        "ALTER TABLE chat_sessions ADD COLUMN provider_id TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = connection.execute(
+        "ALTER TABLE chat_messages ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'",
+        [],
+    );
+    let _ = connection.execute(
+        "ALTER TABLE chat_messages ADD COLUMN status TEXT NOT NULL DEFAULT 'complete'",
+        [],
+    );
 
     let count: i64 = connection
         .query_row("SELECT COUNT(*) FROM projects", [], |row| row.get(0))
@@ -2189,25 +2216,57 @@ fn rename_chat_session(
     lock: State<StoreLock>,
 ) -> Result<(), String> {
     let title = title.trim();
-    if title.is_empty() || title.chars().count() > 120 { return Err("会话名称应为 1 到 120 个字符".to_string()); }
-    let _guard = lock.0.lock().map_err(|_| "project store lock poisoned".to_string())?;
-    let changed = open_projects(&app)?.execute(
-        "UPDATE chat_sessions SET title = ?1, updated_at = ?2 WHERE id = ?3",
-        params![title, Utc::now().to_rfc3339(), session_id],
-    ).map_err(|error| error.to_string())?;
-    if changed == 0 { return Err("chat session not found".to_string()); }
+    if title.is_empty() || title.chars().count() > 120 {
+        return Err("会话名称应为 1 到 120 个字符".to_string());
+    }
+    let _guard = lock
+        .0
+        .lock()
+        .map_err(|_| "project store lock poisoned".to_string())?;
+    let changed = open_projects(&app)?
+        .execute(
+            "UPDATE chat_sessions SET title = ?1, updated_at = ?2 WHERE id = ?3",
+            params![title, Utc::now().to_rfc3339(), session_id],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed == 0 {
+        return Err("chat session not found".to_string());
+    }
     Ok(())
 }
 
 #[tauri::command]
-fn delete_chat_session(app: AppHandle, session_id: String, lock: State<StoreLock>) -> Result<(), String> {
-    let _guard = lock.0.lock().map_err(|_| "project store lock poisoned".to_string())?;
+fn delete_chat_session(
+    app: AppHandle,
+    session_id: String,
+    lock: State<StoreLock>,
+) -> Result<(), String> {
+    let _guard = lock
+        .0
+        .lock()
+        .map_err(|_| "project store lock poisoned".to_string())?;
     let connection = open_projects(&app)?;
-    let transaction = connection.unchecked_transaction().map_err(|error| error.to_string())?;
-    transaction.execute("DELETE FROM chat_messages WHERE session_id = ?1", [&session_id]).map_err(|error| error.to_string())?;
-    transaction.execute("DELETE FROM agent_previews WHERE session_id = ?1", [&session_id]).map_err(|error| error.to_string())?;
-    let changed = transaction.execute("DELETE FROM chat_sessions WHERE id = ?1", [&session_id]).map_err(|error| error.to_string())?;
-    if changed == 0 { return Err("chat session not found".to_string()); }
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM chat_messages WHERE session_id = ?1",
+            [&session_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM agent_previews WHERE session_id = ?1",
+            [&session_id],
+        )
+        .map_err(|error| error.to_string())?;
+    let changed = transaction
+        .execute("DELETE FROM chat_sessions WHERE id = ?1", [&session_id])
+        .map_err(|error| error.to_string())?;
+    if changed == 0 {
+        return Err("chat session not found".to_string());
+    }
     transaction.commit().map_err(|error| error.to_string())
 }
 
@@ -2330,10 +2389,10 @@ async fn send_chat_message(
         role: "assistant".to_string(),
         content: chat_response_content(&value)
             .ok_or("chat response did not contain message content".to_string())?,
-            context_json: "{}".to_string(),
-            attachments_json: "[]".to_string(),
-            status: "complete".to_string(),
-            created_at: Utc::now().to_rfc3339(),
+        context_json: "{}".to_string(),
+        attachments_json: "[]".to_string(),
+        status: "complete".to_string(),
+        created_at: Utc::now().to_rfc3339(),
     };
     let _guard = lock
         .0
@@ -2435,10 +2494,17 @@ fn execute_agent_preview(
         .ok_or("a project is required for canvas actions".to_string())?;
     let actions: Vec<serde_json::Value> = serde_json::from_str(&preview.actions_json)
         .map_err(|error| format!("invalid confirmed agent preview: {error}"))?;
-    if actions.iter().any(|action| matches!(action.get("type").and_then(serde_json::Value::as_str), Some("generateImage") | Some("generateVideo"))) {
+    if actions.iter().any(|action| {
+        matches!(
+            action.get("type").and_then(serde_json::Value::as_str),
+            Some("generateImage") | Some("generateVideo")
+        )
+    }) {
         return Err("paid generation is not executed by an agent preview; use the generation form for a second confirmation".to_string());
     }
-    if actions.iter().any(|action| action.get("type").and_then(serde_json::Value::as_str) == Some("connectImagesToVideo")) {
+    if actions.iter().any(|action| {
+        action.get("type").and_then(serde_json::Value::as_str) == Some("connectImagesToVideo")
+    }) {
         return Err("use the canvas multi-image connection toolbar to choose a target video node explicitly".to_string());
     }
     let project = get_project_record_from_db(&connection, &project_id)?
@@ -2448,52 +2514,157 @@ fn execute_agent_preview(
     let before_nodes = nodes.clone();
     let before_edges = edges.clone();
     for action in actions {
-        let kind = action.get("type").and_then(serde_json::Value::as_str).unwrap_or_default();
-        let params = action.get("params").and_then(serde_json::Value::as_object).ok_or("agent action params are required".to_string())?;
+        let kind = action
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let params = action
+            .get("params")
+            .and_then(serde_json::Value::as_object)
+            .ok_or("agent action params are required".to_string())?;
         match kind {
             "createNodes" => {
-                let items = params.get("nodes").and_then(serde_json::Value::as_array).ok_or("createNodes requires params.nodes".to_string())?;
-                if items.len() > 20 { return Err("agent preview cannot create more than 20 nodes".to_string()); }
+                let items = params
+                    .get("nodes")
+                    .and_then(serde_json::Value::as_array)
+                    .ok_or("createNodes requires params.nodes".to_string())?;
+                if items.len() > 20 {
+                    return Err("agent preview cannot create more than 20 nodes".to_string());
+                }
                 for (index, item) in items.iter().enumerate() {
-                    let requested_type = item.get("type").and_then(serde_json::Value::as_str).unwrap_or("text");
-                    if !matches!(requested_type, "text" | "image" | "video") { return Err("agent nodes must be text, image, or video".to_string()); }
-                    let label = item.get("label").and_then(serde_json::Value::as_str).unwrap_or(requested_type).chars().take(160).collect::<String>();
-                    let prompt = item.get("prompt").and_then(serde_json::Value::as_str).unwrap_or_default().chars().take(4000).collect::<String>();
-                    let x = item.get("x").and_then(serde_json::Value::as_f64).unwrap_or(80.0 + index as f64 * 36.0).clamp(-100_000.0, 100_000.0);
-                    let y = item.get("y").and_then(serde_json::Value::as_f64).unwrap_or(80.0 + index as f64 * 36.0).clamp(-100_000.0, 100_000.0);
+                    let requested_type = item
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("text");
+                    if !matches!(requested_type, "text" | "image" | "video") {
+                        return Err("agent nodes must be text, image, or video".to_string());
+                    }
+                    let label = item
+                        .get("label")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or(requested_type)
+                        .chars()
+                        .take(160)
+                        .collect::<String>();
+                    let prompt = item
+                        .get("prompt")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .chars()
+                        .take(4000)
+                        .collect::<String>();
+                    let x = item
+                        .get("x")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(80.0 + index as f64 * 36.0)
+                        .clamp(-100_000.0, 100_000.0);
+                    let y = item
+                        .get("y")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(80.0 + index as f64 * 36.0)
+                        .clamp(-100_000.0, 100_000.0);
                     nodes.push(serde_json::json!({"id": format!("agent-{}", Uuid::new_v4()), "type": requested_type, "position": {"x": x, "y": y}, "data": {"label": label, "prompt": prompt}}));
                 }
             }
             "updateNodePrompts" => {
-                let updates = params.get("updates").and_then(serde_json::Value::as_array).ok_or("updateNodePrompts requires params.updates".to_string())?;
+                let updates = params
+                    .get("updates")
+                    .and_then(serde_json::Value::as_array)
+                    .ok_or("updateNodePrompts requires params.updates".to_string())?;
                 for update in updates.iter().take(50) {
-                    let id = update.get("id").and_then(serde_json::Value::as_str).ok_or("prompt update requires id".to_string())?;
-                    let prompt = update.get("prompt").and_then(serde_json::Value::as_str).ok_or("prompt update requires prompt".to_string())?.chars().take(4000).collect::<String>();
+                    let id = update
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or("prompt update requires id".to_string())?;
+                    let prompt = update
+                        .get("prompt")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or("prompt update requires prompt".to_string())?
+                        .chars()
+                        .take(4000)
+                        .collect::<String>();
                     if let Some(node) = nodes.iter_mut().find(|node| node_id(node) == Some(id)) {
-                        let data = node.as_object_mut().ok_or("canvas node must be an object".to_string())?.entry("data").or_insert_with(|| serde_json::json!({}));
-                        data.as_object_mut().ok_or("canvas node data must be an object".to_string())?.insert("prompt".to_string(), serde_json::Value::String(prompt));
+                        let data = node
+                            .as_object_mut()
+                            .ok_or("canvas node must be an object".to_string())?
+                            .entry("data")
+                            .or_insert_with(|| serde_json::json!({}));
+                        data.as_object_mut()
+                            .ok_or("canvas node data must be an object".to_string())?
+                            .insert("prompt".to_string(), serde_json::Value::String(prompt));
                     }
                 }
             }
             "deleteNodes" => {
-                let ids = params.get("ids").and_then(serde_json::Value::as_array).ok_or("deleteNodes requires params.ids".to_string())?.iter().filter_map(serde_json::Value::as_str).collect::<Vec<_>>();
+                let ids = params
+                    .get("ids")
+                    .and_then(serde_json::Value::as_array)
+                    .ok_or("deleteNodes requires params.ids".to_string())?
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>();
                 nodes.retain(|node| !node_id(node).is_some_and(|id| ids.contains(&id)));
-                edges.retain(|edge| !edge.get("source").and_then(serde_json::Value::as_str).is_some_and(|id| ids.contains(&id)) && !edge.get("target").and_then(serde_json::Value::as_str).is_some_and(|id| ids.contains(&id)));
+                edges.retain(|edge| {
+                    !edge
+                        .get("source")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|id| ids.contains(&id))
+                        && !edge
+                            .get("target")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|id| ids.contains(&id))
+                });
             }
             "arrangeNodes" => {
-                let ids = params.get("ids").and_then(serde_json::Value::as_array).ok_or("arrangeNodes requires params.ids".to_string())?.iter().filter_map(serde_json::Value::as_str).collect::<Vec<_>>();
-                let vertical = params.get("direction").and_then(serde_json::Value::as_str) == Some("vertical");
-                let mut selected = nodes.iter_mut().filter(|node| node_id(node).is_some_and(|id| ids.contains(&id))).collect::<Vec<_>>();
-                selected.sort_by(|left, right| { let a = node_position(left); let b = node_position(right); if vertical { a.1.total_cmp(&b.1).then(a.0.total_cmp(&b.0)) } else { a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)) } });
-                let anchor_x = selected.iter().map(|node| node_position(node).0).fold(f64::INFINITY, f64::min);
-                let anchor_y = selected.iter().map(|node| node_position(node).1).fold(f64::INFINITY, f64::min);
+                let ids = params
+                    .get("ids")
+                    .and_then(serde_json::Value::as_array)
+                    .ok_or("arrangeNodes requires params.ids".to_string())?
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>();
+                let vertical =
+                    params.get("direction").and_then(serde_json::Value::as_str) == Some("vertical");
+                let mut selected = nodes
+                    .iter_mut()
+                    .filter(|node| node_id(node).is_some_and(|id| ids.contains(&id)))
+                    .collect::<Vec<_>>();
+                selected.sort_by(|left, right| {
+                    let a = node_position(left);
+                    let b = node_position(right);
+                    if vertical {
+                        a.1.total_cmp(&b.1).then(a.0.total_cmp(&b.0))
+                    } else {
+                        a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1))
+                    }
+                });
+                let anchor_x = selected
+                    .iter()
+                    .map(|node| node_position(node).0)
+                    .fold(f64::INFINITY, f64::min);
+                let anchor_y = selected
+                    .iter()
+                    .map(|node| node_position(node).1)
+                    .fold(f64::INFINITY, f64::min);
                 let mut cursor = if vertical { anchor_y } else { anchor_x };
                 for node in selected {
                     let size = node_size(node);
-                    let position = node.as_object_mut().ok_or("canvas node must be an object".to_string())?.entry("position").or_insert_with(|| serde_json::json!({}));
-                    let position = position.as_object_mut().ok_or("canvas node position must be an object".to_string())?;
-                    position.insert("x".to_string(), serde_json::json!(if vertical { anchor_x } else { cursor }));
-                    position.insert("y".to_string(), serde_json::json!(if vertical { cursor } else { anchor_y }));
+                    let position = node
+                        .as_object_mut()
+                        .ok_or("canvas node must be an object".to_string())?
+                        .entry("position")
+                        .or_insert_with(|| serde_json::json!({}));
+                    let position = position
+                        .as_object_mut()
+                        .ok_or("canvas node position must be an object".to_string())?;
+                    position.insert(
+                        "x".to_string(),
+                        serde_json::json!(if vertical { anchor_x } else { cursor }),
+                    );
+                    position.insert(
+                        "y".to_string(),
+                        serde_json::json!(if vertical { cursor } else { anchor_y }),
+                    );
                     cursor += if vertical { size.1 } else { size.0 } + 48.0;
                 }
             }
@@ -2501,10 +2672,26 @@ fn execute_agent_preview(
         }
     }
     let updated = write_project_canvas(&connection, &project, &nodes, &edges)?;
-    record_canvas_batch_history(&connection, &project_id, "agent-preview", &before_nodes, &before_edges, &nodes, &edges)?;
+    record_canvas_batch_history(
+        &connection,
+        &project_id,
+        "agent-preview",
+        &before_nodes,
+        &before_edges,
+        &nodes,
+        &edges,
+    )?;
     preview.status = "executed".to_string();
-    connection.execute("UPDATE agent_previews SET status = ?1 WHERE id = ?2", params![preview.status, preview.id]).map_err(|error| error.to_string())?;
-    Ok(AgentExecution { preview, project: updated })
+    connection
+        .execute(
+            "UPDATE agent_previews SET status = ?1 WHERE id = ?2",
+            params![preview.status, preview.id],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(AgentExecution {
+        preview,
+        project: updated,
+    })
 }
 
 fn project_nodes(project: &ProjectRecord) -> Result<Vec<serde_json::Value>, String> {
@@ -2790,6 +2977,91 @@ fn apply_canvas_batch_action(
 }
 
 #[tauri::command]
+fn append_blank_canvas_images(
+    app: AppHandle,
+    project_id: String,
+    images: Vec<BlankCanvasImageInput>,
+    x: f64,
+    y: f64,
+    lock: State<StoreLock>,
+) -> Result<ProjectRecord, String> {
+    if images.is_empty() || images.len() > 20 {
+        return Err("drop between 1 and 20 images at a time".to_string());
+    }
+    if !x.is_finite() || !y.is_finite() {
+        return Err("invalid canvas drop position".to_string());
+    }
+    let _guard = lock
+        .0
+        .lock()
+        .map_err(|_| "project store lock poisoned".to_string())?;
+    let connection = open_projects(&app)?;
+    let project = get_project_record_from_db(&connection, &project_id)?
+        .ok_or("project not found".to_string())?;
+    let mut nodes = project_nodes(&project)?;
+    let edges = project_edges(&project)?;
+    let before_nodes = nodes.clone();
+    let before_edges = edges.clone();
+
+    for (index, image) in images.into_iter().enumerate() {
+        if image.file_name.trim().is_empty() || image.file_name.len() > 240 {
+            return Err("image file name is invalid".to_string());
+        }
+        if !image.source.starts_with("data:image/") || image.source.len() > 42_000_000 {
+            return Err("only image files up to 30 MB may be dropped".to_string());
+        }
+        let path = persist_media_source(&app, "images", image.source)?;
+        let decoded = match image::open(&path) {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                let _ = fs::remove_file(&path);
+                return Err(format!("cannot read dropped image: {error}"));
+            }
+        };
+        let (width, height) = decoded.dimensions();
+        let preview_path = if width.max(height) > 1600 {
+            let preview_image = decoded.thumbnail(1600, 1600);
+            let preview_file =
+                media_dir(&app, "previews")?.join(format!("preview_{}.png", Uuid::new_v4()));
+            preview_image
+                .save(&preview_file)
+                .map_err(|error| format!("cannot save image preview: {error}"))?;
+            preview_file.display().to_string()
+        } else {
+            path.clone()
+        };
+        let column = (index % 3) as f64;
+        let row = (index / 3) as f64;
+        nodes.push(serde_json::json!({
+            "id": format!("upload-{}", Uuid::new_v4()),
+            "type": "uploadNode",
+            "position": {"x": x + column * 368.0, "y": y + row * 300.0},
+            "data": {
+                "displayName": image.file_name,
+                "imageUrl": path,
+                "previewImageUrl": preview_path,
+                "aspectRatio": "1:1",
+                "isSizeManuallyAdjusted": true,
+                "sourceFileName": image.file_name,
+                "imageWidth": width,
+                "imageHeight": height
+            }
+        }));
+    }
+    let updated = write_project_canvas(&connection, &project, &nodes, &edges)?;
+    record_canvas_batch_history(
+        &connection,
+        &project_id,
+        "blank-image-drop",
+        &before_nodes,
+        &before_edges,
+        &nodes,
+        &edges,
+    )?;
+    Ok(updated)
+}
+
+#[tauri::command]
 fn undo_last_canvas_batch_action(
     app: AppHandle,
     project_id: String,
@@ -3051,19 +3323,59 @@ fn list_models(app: AppHandle, lock: State<StoreLock>) -> Result<Vec<String>, St
 }
 
 #[tauri::command]
-fn list_api_provider_settings(app: AppHandle, lock: State<StoreLock>) -> Result<Vec<serde_json::Value>, String> {
-    let _guard = lock.0.lock().map_err(|_| "settings store lock poisoned".to_string())?;
+fn list_api_provider_settings(
+    app: AppHandle,
+    lock: State<StoreLock>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let _guard = lock
+        .0
+        .lock()
+        .map_err(|_| "settings store lock poisoned".to_string())?;
     let settings: Settings = read_json(settings_path(&app)?)?;
     let mut providers = settings.custom_providers;
     for provider in providers.iter_mut() {
-        let Some(id) = provider.get("id").and_then(serde_json::Value::as_str).map(ToOwned::to_owned) else { continue; };
+        let Some(id) = provider
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned)
+        else {
+            continue;
+        };
         let configured_base_url = settings.base_urls.get(&id).cloned();
-        let configured_key = settings.api_keys.get(&id).is_some_and(|key| !key.trim().is_empty());
-        let catalog = settings.model_catalog.iter().filter(|entry| entry.get("providerId").and_then(serde_json::Value::as_str) == Some(id.as_str())).cloned().collect::<Vec<_>>();
+        let configured_key = settings
+            .api_keys
+            .get(&id)
+            .is_some_and(|key| !key.trim().is_empty());
+        let catalog = settings
+            .model_catalog
+            .iter()
+            .filter(|entry| {
+                entry.get("providerId").and_then(serde_json::Value::as_str) == Some(id.as_str())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         if let Some(object) = provider.as_object_mut() {
-            object.insert("base_url".to_string(), serde_json::Value::String(configured_base_url.or_else(|| object.get("base_url").and_then(serde_json::Value::as_str).map(ToOwned::to_owned)).unwrap_or_default()));
-            object.insert("key_configured".to_string(), serde_json::Value::Bool(configured_key));
-            object.insert("model_catalog".to_string(), serde_json::Value::Array(catalog));
+            object.insert(
+                "base_url".to_string(),
+                serde_json::Value::String(
+                    configured_base_url
+                        .or_else(|| {
+                            object
+                                .get("base_url")
+                                .and_then(serde_json::Value::as_str)
+                                .map(ToOwned::to_owned)
+                        })
+                        .unwrap_or_default(),
+                ),
+            );
+            object.insert(
+                "key_configured".to_string(),
+                serde_json::Value::Bool(configured_key),
+            );
+            object.insert(
+                "model_catalog".to_string(),
+                serde_json::Value::Array(catalog),
+            );
         }
     }
     providers.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
@@ -3084,10 +3396,18 @@ fn save_api_model_catalog(
         return Err("invalid provider or model kind".to_string());
     }
     let models = normalized_catalog_models(&models)?;
-    let _guard = lock.0.lock().map_err(|_| "settings store lock poisoned".to_string())?;
+    let _guard = lock
+        .0
+        .lock()
+        .map_err(|_| "settings store lock poisoned".to_string())?;
     let mut settings: Settings = read_json(settings_path(&app)?)?;
-    settings.model_catalog.retain(|entry| !(entry.get("providerId").and_then(serde_json::Value::as_str) == Some(provider_id) && entry.get("kind").and_then(serde_json::Value::as_str) == Some(kind)));
-    settings.model_catalog.push(serde_json::json!({"providerId": provider_id, "kind": kind, "models": models}));
+    settings.model_catalog.retain(|entry| {
+        !(entry.get("providerId").and_then(serde_json::Value::as_str) == Some(provider_id)
+            && entry.get("kind").and_then(serde_json::Value::as_str) == Some(kind))
+    });
+    settings
+        .model_catalog
+        .push(serde_json::json!({"providerId": provider_id, "kind": kind, "models": models}));
     write_json(settings_path(&app)?, &settings)
 }
 
@@ -3098,18 +3418,49 @@ fn list_configured_models(
     lock: State<StoreLock>,
 ) -> Result<Vec<serde_json::Value>, String> {
     let kind = kind.trim();
-    if !model_kind_is_valid(kind) { return Err("invalid model kind".to_string()); }
-    let _guard = lock.0.lock().map_err(|_| "settings store lock poisoned".to_string())?;
+    if !model_kind_is_valid(kind) {
+        return Err("invalid model kind".to_string());
+    }
+    let _guard = lock
+        .0
+        .lock()
+        .map_err(|_| "settings store lock poisoned".to_string())?;
     let settings: Settings = read_json(settings_path(&app)?)?;
-    let provider_names = settings.custom_providers.iter().filter_map(|provider| {
-        Some((provider.get("id")?.as_str()?.to_string(), provider.get("name").and_then(serde_json::Value::as_str).unwrap_or_default().to_string()))
-    }).collect::<HashMap<_, _>>();
+    let provider_names = settings
+        .custom_providers
+        .iter()
+        .filter_map(|provider| {
+            Some((
+                provider.get("id")?.as_str()?.to_string(),
+                provider
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            ))
+        })
+        .collect::<HashMap<_, _>>();
     let mut items = Vec::new();
     for entry in settings.model_catalog {
-        if entry.get("kind").and_then(serde_json::Value::as_str) != Some(kind) { continue; }
-        let Some(provider_id) = entry.get("providerId").and_then(serde_json::Value::as_str) else { continue; };
-        if !settings.api_keys.get(provider_id).is_some_and(|key| !key.trim().is_empty()) { continue; }
-        for model in entry.get("models").and_then(serde_json::Value::as_array).into_iter().flatten() {
+        if entry.get("kind").and_then(serde_json::Value::as_str) != Some(kind) {
+            continue;
+        }
+        let Some(provider_id) = entry.get("providerId").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if !settings
+            .api_keys
+            .get(provider_id)
+            .is_some_and(|key| !key.trim().is_empty())
+        {
+            continue;
+        }
+        for model in entry
+            .get("models")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
             items.push(serde_json::json!({
                 "providerId": provider_id,
                 "providerName": provider_names.get(provider_id).cloned().unwrap_or_else(|| provider_id.to_string()),
@@ -3261,7 +3612,11 @@ fn credits_machine_id(app: AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn credits_balance(app: AppHandle, machine_id: String, token: String) -> Result<serde_json::Value, String> {
+async fn credits_balance(
+    app: AppHandle,
+    machine_id: String,
+    token: String,
+) -> Result<serde_json::Value, String> {
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()
@@ -4007,6 +4362,7 @@ fn main() {
             find_project_for_canvas_selection,
             preview_canvas_batch_action,
             apply_canvas_batch_action,
+            append_blank_canvas_images,
             undo_last_canvas_batch_action,
             redo_last_canvas_batch_action,
             set_api_key,
