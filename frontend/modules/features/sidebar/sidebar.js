@@ -52,9 +52,23 @@ export function installSidebar({ openChat, openAnnouncements, openApiSettings, o
     .catch(() => { versionLabel.textContent = "花海画布"; });
 
   const section = root.querySelector(".huahai-sidebar__section");
+  let lastCanvasActive = null;
+  let canvasSyncQueued = false;
+  const syncCanvasState = () => {
+    canvasSyncQueued = false;
+    const active = isCanvasActive();
+    if (active === lastCanvasActive) return;
+    lastCanvasActive = active;
+    document.body.classList.toggle("huahai-canvas-active", active);
+  };
+  const scheduleCanvasStateSync = () => {
+    if (canvasSyncQueued) return;
+    canvasSyncQueued = true;
+    window.requestAnimationFrame(syncCanvasState);
+  };
   const open = () => {
     document.body.classList.add("huahai-sidebar-open");
-    document.body.classList.toggle("huahai-canvas-active", isCanvasActive());
+    scheduleCanvasStateSync();
   };
   const close = () => {
     if (!sidebar.contains(document.activeElement)) document.body.classList.remove("huahai-sidebar-open");
@@ -109,9 +123,10 @@ export function installSidebar({ openChat, openAnnouncements, openApiSettings, o
     }
   });
 
-  const observer = new MutationObserver(() => {
-    document.body.classList.toggle("huahai-canvas-active", isCanvasActive());
-  });
+  // The recovered React application mutates deeply while rendering nodes and
+  // generation progress. Coalesce those mutations so the optional sidebar
+  // never repeatedly queries the whole legacy canvas in one frame.
+  const observer = new MutationObserver(scheduleCanvasStateSync);
   observer.observe(document.getElementById("root"), { childList: true, subtree: true });
   window.addEventListener("pagehide", () => {
     observer.disconnect();
