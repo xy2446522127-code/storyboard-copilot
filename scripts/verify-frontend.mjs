@@ -66,6 +66,14 @@ if (!blankCanvasDrop.includes("LEGACY_SAVE_TIMEOUT_MS") || blankCanvasDrop.inclu
   throw new Error("Blank-canvas drops must wait for one unambiguous legacy save and must not guess a project.");
 }
 
+const batchTools = readFileSync(resolve(root, "frontend/modules/features/canvas/batch-tools.js"), "utf8");
+if (!batchTools.includes("savedProjectForSelection") || !batchTools.includes("LEGACY_SAVE_TIMEOUT_MS")) {
+  throw new Error("Canvas batch tools must wait for the legacy save instead of using a fixed persistence delay.");
+}
+if (batchTools.includes("await new Promise((resolve) => window.setTimeout(resolve, 650));")) {
+  throw new Error("Canvas batch tools must not assume the legacy canvas has saved after 650 ms.");
+}
+
 const sidebar = readFileSync(resolve(root, "frontend/modules/features/sidebar/sidebar.js"), "utf8");
 if (!sidebar.includes('event.clientX <= 3') || !sidebar.includes('sidebar.addEventListener("pointerleave", close)')) {
   throw new Error("Sidebar must retain the non-overlay left-edge reveal and immediate pointer-leave close behavior.");

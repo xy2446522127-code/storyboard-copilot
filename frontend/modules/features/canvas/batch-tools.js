@@ -1,5 +1,8 @@
 import { invoke, selectedFlowNodeIds, toast } from "../../shared/tauri.js";
 
+const LEGACY_SAVE_TIMEOUT_MS = 4_000;
+const LEGACY_SAVE_POLL_MS = 120;
+
 export function installCanvasBatchTools() {
   const toolbar = document.createElement("div");
   toolbar.id = "huahai-canvas-batch-tools";
@@ -42,6 +45,26 @@ export function installCanvasBatchTools() {
     button.click();
     return true;
   };
+  const savedProjectForSelection = async (nodeIds) => {
+    if (!nodeIds.length) return null;
+    const before = await invoke("list_project_summaries");
+    const beforeUpdatedAt = new Map(before.map((project) => [project.id, project.updatedAt]));
+    if (!saveLegacyCanvas()) return undefined;
+    // The legacy canvas does not expose a save-complete event.  Do not assume a
+    // fixed delay is enough: wait for the project containing this exact current
+    // selection to receive a new persisted timestamp before changing its canvas
+    // from the compatibility plug-in.
+    const deadline = Date.now() + LEGACY_SAVE_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, LEGACY_SAVE_POLL_MS));
+      const projectId = await invoke("find_project_for_canvas_selection", { nodeIds });
+      if (!projectId) continue;
+      const projects = await invoke("list_project_summaries");
+      const project = projects.find((candidate) => candidate.id === projectId);
+      if (project && beforeUpdatedAt.get(project.id) !== project.updatedAt) return projectId;
+    }
+    return null;
+  };
   document.addEventListener("pointerup", delayedRefresh, true);
   document.addEventListener("keyup", delayedRefresh, true);
   const nodeSelector = ".react-flow__node, .xyflow__node";
@@ -75,15 +98,14 @@ export function installCanvasBatchTools() {
       } catch (error) { toast(`${action === "undo" ? "撤销" : "重做"}未执行：${String(error)}`, "error"); }
       return;
     }
-    if (!saveLegacyCanvas()) {
-      toast("请先使用旧画布顶部的“保存画布”保存项目，再进行批量操作。", "info");
-      return;
-    }
-    await new Promise((resolve) => window.setTimeout(resolve, 650));
-    const nodeIds = selectedFlowNodeIds();
     try {
-      const projectId = await invoke("find_project_for_canvas_selection", { nodeIds });
-      if (!projectId) throw new Error("未能识别当前项目；请先保存并重新打开画布。");
+      const nodeIds = selectedFlowNodeIds();
+      const projectId = await savedProjectForSelection(nodeIds);
+      if (projectId === undefined) {
+        toast("请先使用旧画布顶部的“保存画布”保存项目，再进行批量操作。", "info");
+        return;
+      }
+      if (!projectId) throw new Error("画布保存未完成或当前项目无法唯一确认；请稍后重试。");
       const needsImages = ["connect-video", "arrange-horizontal", "arrange-vertical", "arrange-connected"].includes(action);
       const preview = needsImages ? await invoke("preview_canvas_batch_action", { projectId, selectedNodeIds: nodeIds }) : null;
       let targetVideoNodeId = null;
