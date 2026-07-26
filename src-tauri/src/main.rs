@@ -208,6 +208,54 @@ mod tests {
     }
 
     #[test]
+    fn image_studio_request_is_limited_to_configured_model_and_safe_fields() {
+        let settings = Settings {
+            model_catalog: vec![serde_json::json!({
+                "providerId":"provider-a", "kind":"image", "models":[{
+                    "id":"image-model", "capabilities":{"negativePrompt":true,"seed":true,"multiReference":true}
+                }]
+            })],
+            ..Settings::default()
+        };
+        let request = serde_json::json!({
+            "provider_id":"provider-a", "model":"image-model", "prompt":"flower sea",
+            "n":2, "size":"1024x1024", "seed":7,
+            "api_key":"must-not-leave-the-process",
+            "reference_images":[{"image_url":"data:image/png;base64,QUJD"}]
+        });
+        let normalized = normalize_image_studio_request(request, &settings).unwrap();
+        assert_eq!(normalized["n"], 2);
+        assert!(normalized.get("api_key").is_none());
+        let outbound = image_studio_provider_request(&normalized);
+        assert!(outbound.get("provider_id").is_none());
+        assert!(outbound.get("api_key").is_none());
+    }
+
+    #[test]
+    fn image_studio_rejects_unconfigured_model_and_unsupported_multiple_references() {
+        let settings = Settings {
+            model_catalog: vec![serde_json::json!({
+                "providerId":"provider-a", "kind":"image", "models":[{
+                    "id":"single-reference", "capabilities":{}
+                }]
+            })],
+            ..Settings::default()
+        };
+        let request = serde_json::json!({
+            "provider_id":"provider-a", "model":"single-reference", "prompt":"flower sea",
+            "reference_images":[
+                {"image_url":"https://example.test/one.png"},
+                {"image_url":"https://example.test/two.png"}
+            ]
+        });
+        assert!(normalize_image_studio_request(request, &settings).is_err());
+        let missing = serde_json::json!({
+            "provider_id":"provider-a", "model":"not-configured", "prompt":"flower sea"
+        });
+        assert!(normalize_image_studio_request(missing, &settings).is_err());
+    }
+
+    #[test]
     fn provider_model_categories_are_merged_without_duplicates() {
         let existing = serde_json::json!({"models": ["image-model", "shared-model"]});
         let incoming = vec![
@@ -759,6 +807,187 @@ fn image_job_request_metadata(request: &serde_json::Value) -> String {
         "referenceCount": references
     })
     .to_string()
+}
+
+const MAX_IMAGE_STUDIO_PROMPT_CHARS: usize = 8_000;
+const MAX_IMAGE_STUDIO_NEGATIVE_PROMPT_CHARS: usize = 4_000;
+const MAX_IMAGE_STUDIO_REFERENCES: usize = 4;
+const MAX_IMAGE_STUDIO_REFERENCE_BYTES: usize = 10 * 1024 * 1024;
+const MAX_IMAGE_STUDIO_REFERENCE_TOTAL_BYTES: usize = 20 * 1024 * 1024;
+
+/// The online-image panel is only one caller of this command.  Validate and
+/// normalize its request again in Rust so a stale WebView, a devtools call, or
+/// a future UI change cannot bypass the limits, model capability checks, or
+/// accidentally send a local path / second API key to a provider.
+fn normalize_image_studio_request(
+    request: serde_json::Value,
+    settings: &Settings,
+) -> Result<serde_json::Value, String> {
+    let provider_id = request
+        .get("provider_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or("image request is missing provider_id")?;
+    let model = request
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.chars().count() <= 256)
+        .ok_or("image request is missing a valid model")?;
+    let prompt = request
+        .get("prompt")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.chars().count() <= MAX_IMAGE_STUDIO_PROMPT_CHARS)
+        .ok_or("image prompt must be 1 to 8000 characters")?;
+    let catalog_model = settings
+        .model_catalog
+        .iter()
+        .find(|entry| {
+            entry.get("providerId").and_then(serde_json::Value::as_str) == Some(provider_id)
+                && entry.get("kind").and_then(serde_json::Value::as_str) == Some("image")
+                && entry
+                    .get("models")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|models| {
+                        models.iter().any(|entry| {
+                            entry.get("id").and_then(serde_json::Value::as_str) == Some(model)
+                        })
+                    })
+        })
+        .and_then(|entry| entry.get("models").and_then(serde_json::Value::as_array))
+        .and_then(|models| {
+            models.iter().find(|entry| entry.get("id").and_then(serde_json::Value::as_str) == Some(model))
+        })
+        .ok_or("selected image model is not configured in API settings")?;
+    let capabilities = catalog_model
+        .get("capabilities")
+        .and_then(serde_json::Value::as_object);
+    let supports = |name: &str| {
+        capabilities
+            .and_then(|items| items.get(name))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    };
+    let negative_prompt = request
+        .get("negative_prompt")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if negative_prompt.is_some() && !supports("negativePrompt") {
+        return Err("selected image model does not support a negative prompt".to_string());
+    }
+    if negative_prompt.is_some_and(|value| value.chars().count() > MAX_IMAGE_STUDIO_NEGATIVE_PROMPT_CHARS) {
+        return Err("negative prompt must be at most 4000 characters".to_string());
+    }
+    let count = request
+        .get("n")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(1);
+    if !(1..=4).contains(&count) {
+        return Err("image count must be between 1 and 4".to_string());
+    }
+    let size = request
+        .get("size")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(size) = size {
+        let (width, height) = size
+            .split_once('x')
+            .or_else(|| size.split_once('X'))
+            .ok_or("image size must use WIDTHxHEIGHT")?;
+        let width = width.parse::<u32>().map_err(|_| "image width is invalid")?;
+        let height = height.parse::<u32>().map_err(|_| "image height is invalid")?;
+        if !(256..=4096).contains(&width)
+            || !(256..=4096).contains(&height)
+            || width % 64 != 0
+            || height % 64 != 0
+        {
+            return Err("image size must be 256-4096 and divisible by 64".to_string());
+        }
+    }
+    if request.get("seed").is_some() && !supports("seed") {
+        return Err("selected image model does not support a seed".to_string());
+    }
+    let references = request
+        .get("reference_images")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if references.len() > MAX_IMAGE_STUDIO_REFERENCES {
+        return Err("at most four reference images are allowed".to_string());
+    }
+    if references.len() > 1 && !supports("multiReference") {
+        return Err("selected image model supports only one reference image".to_string());
+    }
+    let mut total_reference_bytes = 0usize;
+    let mut normalized_references = Vec::with_capacity(references.len());
+    for reference in references {
+        let source = reference
+            .get("image_url")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or("each reference image needs image_url")?;
+        if let Some((header, encoded)) = source.split_once(',') {
+            if !header.starts_with("data:image/") || !header.ends_with(";base64") {
+                return Err("reference image data must be an image base64 URL".to_string());
+            }
+            // Reject obviously oversized payloads before decoding. The decoded
+            // check below also rejects malformed base64 without storing it.
+            if encoded.len() > MAX_IMAGE_STUDIO_REFERENCE_BYTES.saturating_mul(4) / 3 + 4 {
+                return Err("a reference image exceeds 10 MB".to_string());
+            }
+            let bytes = STANDARD
+                .decode(encoded)
+                .map_err(|_| "reference image base64 is invalid")?;
+            if bytes.len() > MAX_IMAGE_STUDIO_REFERENCE_BYTES {
+                return Err("a reference image exceeds 10 MB".to_string());
+            }
+            total_reference_bytes = total_reference_bytes.saturating_add(bytes.len());
+        } else if !source.starts_with("https://") {
+            return Err("reference images must be explicit image data or HTTPS URLs".to_string());
+        }
+        if total_reference_bytes > MAX_IMAGE_STUDIO_REFERENCE_TOTAL_BYTES {
+            return Err("reference images together exceed 20 MB".to_string());
+        }
+        normalized_references.push(serde_json::json!({"image_url": source}));
+    }
+    let mut normalized = serde_json::json!({
+        "provider_id": provider_id,
+        "model": model,
+        "prompt": prompt,
+        "n": count,
+        "reference_images": normalized_references,
+    });
+    if let Some(negative_prompt) = negative_prompt {
+        normalized["negative_prompt"] = serde_json::Value::String(negative_prompt.to_string());
+    }
+    if let Some(size) = size {
+        normalized["size"] = serde_json::Value::String(size.to_string());
+    }
+    for field in ["quality", "seed"] {
+        if let Some(value) = request.get(field) {
+            normalized[field] = value.clone();
+        }
+    }
+    Ok(normalized)
+}
+
+fn image_studio_provider_request(request: &serde_json::Value) -> serde_json::Value {
+    let mut outbound = request.clone();
+    if let Some(object) = outbound.as_object_mut() {
+        // `provider_id` is a local routing field, never an OpenAI request
+        // parameter. Keep secrets and local connection metadata out of the
+        // network payload even if a caller attempted to inject them.
+        object.remove("provider_id");
+        object.remove("api_key");
+        object.remove("base_url");
+        object.remove("authorization");
+    }
+    outbound
 }
 
 /// Generation providers commonly return either a temporary HTTPS URL or an
@@ -5578,9 +5807,10 @@ async fn run_background_image_job(
             return;
         }
     };
+    let provider_request = image_studio_provider_request(&request);
     let response = tokio::select! {
         _ = cancel.cancelled() => None,
-        response = client.post(endpoint).bearer_auth(api_key).json(&request).send() => Some(response),
+        response = client.post(endpoint).bearer_auth(api_key).json(&provider_request).send() => Some(response),
     };
     match response {
         None => cancel_background_image_job_record(&mut job),
@@ -5646,8 +5876,16 @@ fn submit_image_studio_job(
     lock: State<'_, StoreLock>,
     jobs: State<'_, GenerationJobState>,
 ) -> Result<String, String> {
-    let request: serde_json::Value = serde_json::from_str(&payload)
+    let raw_request: serde_json::Value = serde_json::from_str(&payload)
         .map_err(|error| format!("invalid image request: {error}"))?;
+    let request = {
+        let _guard = lock
+            .0
+            .lock()
+            .map_err(|_| "generation job lock poisoned".to_string())?;
+        let settings: Settings = read_json(settings_path(&app)?)?;
+        normalize_image_studio_request(raw_request, &settings)?
+    };
     let provider_id = request
         .get("provider_id")
         .and_then(serde_json::Value::as_str)

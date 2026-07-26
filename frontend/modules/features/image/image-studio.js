@@ -1,6 +1,7 @@
 import { invoke, safeText, toast } from "../../shared/tauri.js";
 
 const maxReferenceBytes = 10 * 1024 * 1024;
+const maxReferenceTotalBytes = 20 * 1024 * 1024;
 const presetsStorageKey = "huahai-image-presets-v1";
 
 function loadPresets() {
@@ -324,8 +325,10 @@ export function installImageStudio({ openApiSettings } = {}) {
       if (refs.length >= 4) break;
       if (!isImageFile(file)) { toast(`${file.name} 不是图片。`, "error"); continue; }
       if (file.size > maxReferenceBytes) { toast(`${file.name} 超过 10 MB。`, "error"); continue; }
+      const used = refs.reduce((total, ref) => total + (Number(ref.size) || 0), 0);
+      if (used + file.size > maxReferenceTotalBytes) { toast("参考图总大小不能超过 20 MB。", "error"); continue; }
       try {
-        refs.push({ preview: URL.createObjectURL(file), dataUrl: await readFile(file), name: file.name });
+        refs.push({ preview: URL.createObjectURL(file), dataUrl: await readFile(file), name: file.name, size: file.size });
       } catch (error) { toast(`${file.name} 读取失败：${String(error)}`, "error"); }
     }
     renderRefs();
