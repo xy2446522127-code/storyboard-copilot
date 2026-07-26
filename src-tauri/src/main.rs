@@ -3765,6 +3765,77 @@ fn append_blank_canvas_images(
     Ok(updated)
 }
 
+/// Adds an image produced by the optional online-image workspace using the same
+/// `uploadNode` shape as the recovered canvas.  The caller chooses the project
+/// explicitly; guessing an "active" project would risk writing a paid result to
+/// the wrong storyboard after an application restart.
+#[tauri::command]
+fn append_image_source_to_canvas(
+    app: AppHandle,
+    project_id: String,
+    source: String,
+    file_name: String,
+    lock: State<StoreLock>,
+) -> Result<ProjectRecord, String> {
+    if file_name.trim().is_empty() || file_name.len() > 240 {
+        return Err("image file name is invalid".to_string());
+    }
+    let _guard = lock
+        .0
+        .lock()
+        .map_err(|_| "project store lock poisoned".to_string())?;
+    let connection = open_projects(&app)?;
+    let project = get_project_record_from_db(&connection, &project_id)?
+        .ok_or("project not found".to_string())?;
+    let mut nodes = project_nodes(&project)?;
+    let edges = project_edges(&project)?;
+    let before_nodes = nodes.clone();
+    let before_edges = edges.clone();
+    // Data URLs and files are copied into the F-drive media directory.  A provider's
+    // HTTPS result URL remains a controlled reference and is intentionally not
+    // downloaded here, so this action creates no unexpected network request.
+    let image_path = persist_media_source(&app, "images", source)?;
+    let (width, height) = if PathBuf::from(&image_path).is_file() {
+        let decoded = image::open(&image_path)
+            .map_err(|error| format!("cannot read generated image: {error}"))?;
+        decoded.dimensions()
+    } else {
+        (1024, 1024)
+    };
+    let (rightmost, lowest) = nodes
+        .iter()
+        .fold((40.0_f64, 40.0_f64), |(right, low), node| {
+            let (x, y) = node_position(node);
+            (right.max(x), low.max(y))
+        });
+    nodes.push(serde_json::json!({
+        "id": format!("upload-{}", Uuid::new_v4()),
+        "type": "uploadNode",
+        "position": {"x": rightmost + 96.0, "y": lowest + 96.0},
+        "data": {
+            "displayName": file_name,
+            "imageUrl": image_path,
+            "previewImageUrl": image_path,
+            "aspectRatio": "1:1",
+            "isSizeManuallyAdjusted": true,
+            "sourceFileName": "online-image-result",
+            "imageWidth": width,
+            "imageHeight": height
+        }
+    }));
+    let updated = write_project_canvas(&connection, &project, &nodes, &edges)?;
+    record_canvas_batch_history(
+        &connection,
+        &project_id,
+        "online-image-result",
+        &before_nodes,
+        &before_edges,
+        &nodes,
+        &edges,
+    )?;
+    Ok(updated)
+}
+
 #[tauri::command]
 fn undo_last_canvas_batch_action(
     app: AppHandle,
@@ -5095,6 +5166,7 @@ fn main() {
             preview_canvas_batch_action,
             apply_canvas_batch_action,
             append_blank_canvas_images,
+            append_image_source_to_canvas,
             undo_last_canvas_batch_action,
             redo_last_canvas_batch_action,
             set_api_key,

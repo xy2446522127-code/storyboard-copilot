@@ -84,7 +84,8 @@ export function installImageStudio({ openApiSettings } = {}) {
         const image = document.createElement("img"); image.src = job.result; image.alt = "生成结果"; image.addEventListener("click", () => window.open(job.result, "_blank")); card.append(image);
         const actions = document.createElement("div"); actions.className = "huahai-image__job-actions";
         const asset = document.createElement("button"); asset.type = "button"; asset.textContent = "加入素材库"; asset.addEventListener("click", () => saveToAssets(job));
-        actions.append(asset); card.append(actions);
+        const canvas = document.createElement("button"); canvas.type = "button"; canvas.textContent = "加入项目画布"; canvas.addEventListener("click", () => addToCanvas(job));
+        actions.append(asset, canvas); card.append(actions);
       }
       return card;
     }));
@@ -95,6 +96,22 @@ export function installImageStudio({ openApiSettings } = {}) {
       await invoke("add_asset", { name: `生图-${new Date().toLocaleString("zh-CN")}`, category: "在线生图", tags: "", filePath: path, sourceType: "online-image", sourceNodeId: null });
       toast("已保存到素材库。", "success");
     } catch (error) { toast(`保存素材失败：${String(error)}`, "error"); }
+  };
+  const addToCanvas = async (job) => {
+    try {
+      const projects = await invoke("list_project_summaries");
+      if (!projects.length) throw new Error("请先在旧版项目管理中创建并保存项目。");
+      const choices = projects.slice(0, 12).map((project, index) => `${index + 1}. ${project.name}`).join("\n");
+      const choice = Number(window.prompt(`选择要加入的项目画布：\n${choices}`, "1"));
+      const project = projects[choice - 1];
+      if (!Number.isInteger(choice) || !project) return;
+      await invoke("append_image_source_to_canvas", {
+        projectId: project.id,
+        source: job.result,
+        fileName: `在线生图-${new Date().toISOString().replace(/[:.]/g, "-")}.png`,
+      });
+      toast(`已加入“${project.name}”画布；可在画布中撤销。`, "success");
+    } catch (error) { toast(`加入画布失败：${String(error)}`, "error"); }
   };
   const poll = async (job) => {
     try {
