@@ -147,9 +147,18 @@ export function installChatPanel({ openApiSettings } = {}) {
     preview.querySelector("button").addEventListener("click", async () => {
       try {
         const stored = await invoke("create_agent_preview", { sessionId: session.id, projectId, actionsJson });
-        const approved = window.confirm("操作预览已保存。确认后仍会显示影响范围和费用提示；是否确认？");
+        const approved = window.confirm("确认后将立即执行预览中的安全本地操作。付费生成和多图连到视频仍不会自动执行，必须从对应工作台再次确认。是否继续？");
         await invoke("resolve_agent_preview", { previewId: stored.id, confirm: approved });
-        toast(approved ? "操作预览已确认；请在画布中审核后应用。" : "操作预览已拒绝。", approved ? "success" : "info");
+        if (!approved) {
+          toast("操作预览已拒绝。", "info");
+          return;
+        }
+        // The Rust executor accepts only the structured whitelist. It refuses
+        // paid generation and ambiguous image-to-video connections, so a chat
+        // reply can never silently spend credits or choose a target node.
+        await invoke("execute_agent_preview", { previewId: stored.id });
+        toast("安全画布操作已执行并写入可撤销历史，正在刷新画布。", "success");
+        window.setTimeout(() => window.location.reload(), 550);
       } catch (error) { toast(`无法创建操作预览：${String(error)}`, "error"); }
     });
     messageNode.append(preview);
