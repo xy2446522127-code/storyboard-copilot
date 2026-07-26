@@ -1,3 +1,5 @@
+import { toast } from "../../shared/tauri.js";
+
 const MEDIA_SELECTOR = ".react-flow img, .xyflow img, .react-flow video, .xyflow video";
 const LARGE_CANVAS_WARNING = 500;
 const MAX_ACTIVE_VIDEOS = 4;
@@ -6,6 +8,19 @@ export function installMediaPerformance() {
   const observed = new WeakSet();
   const activeVideos = new Map();
   let warned = false;
+  let lastVideoLimitNotice = 0;
+  const onLargeCanvas = (event) => {
+    const { count = 0, videos = 0 } = event.detail || {};
+    toast(`当前画布有 ${count} 个媒体节点（含 ${videos} 个视频）。已启用懒加载与离屏暂停；建议关闭不需要的预览。`, "info");
+  };
+  const onVideoLimit = () => {
+    const now = Date.now();
+    if (now - lastVideoLimitNotice < 8000) return;
+    lastVideoLimitNotice = now;
+    toast(`为避免卡顿，同时播放的视频已限制为 ${MAX_ACTIVE_VIDEOS} 个。`, "info");
+  };
+  window.addEventListener("huahai:media-load", onLargeCanvas);
+  window.addEventListener("huahai:media-limit", onVideoLimit);
   const pauseOldestVideo = () => {
     while (activeVideos.size > MAX_ACTIVE_VIDEOS) {
       const oldest = [...activeVideos.entries()].sort((left, right) => left[1] - right[1])[0]?.[0];
@@ -61,6 +76,12 @@ export function installMediaPerformance() {
   const schedule = () => { if (!frame) frame = requestAnimationFrame(() => { frame = 0; scan(); }); };
   const mutationObserver = new MutationObserver(schedule);
   mutationObserver.observe(document.getElementById("root") || document.body, { childList: true, subtree: true });
-  window.addEventListener("pagehide", () => { activeVideos.clear(); observer.disconnect(); mutationObserver.disconnect(); });
+  window.addEventListener("pagehide", () => {
+    activeVideos.clear();
+    observer.disconnect();
+    mutationObserver.disconnect();
+    window.removeEventListener("huahai:media-load", onLargeCanvas);
+    window.removeEventListener("huahai:media-limit", onVideoLimit);
+  });
   scan();
 }
