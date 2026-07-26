@@ -108,7 +108,7 @@ export function installApiSettings() {
           <div class="huahai-api__model-label"><span>模型列表</span><button type="button" data-action="fetch-models">拉取模型</button></div>
           <textarea data-field="models" required rows="4" placeholder="一个或多个模型，使用逗号或换行分隔"></textarea>
           <fieldset data-capabilities><legend>模型能力</legend></fieldset>
-          <div class="huahai-api__actions"><button type="button" data-action="new">新建</button><button type="button" data-action="test-connection">测试连接</button><button type="submit" class="primary">保存此分类</button></div>
+          <div class="huahai-api__actions"><button type="button" data-action="new">新建</button><button type="button" data-action="save-connection">保存连接</button><button type="button" data-action="test-connection">测试连接</button><button type="submit" class="primary">保存此分类</button></div>
         </form>
       </div>
     </div>`;
@@ -191,6 +191,20 @@ export function installApiSettings() {
     capabilityNode.querySelectorAll("input").forEach((input) => { input.checked = false; });
     providersNode.querySelectorAll("button").forEach((button) => button.classList.remove("is-active"));
   };
+  const saveConnection = async () => {
+    const id = ensureProviderId();
+    const name = safeText(field("name").value, id);
+    const baseUrl = safeText(field("baseUrl").value).replace(/\/$/, "");
+    const key = field("key").value;
+    if (!name || !baseUrl) return toast("请填写显示名称和服务地址后再保存连接。", "info");
+    if (!key && !selectedProviderId) return toast("新服务需要先填写 API Key，才能保存连接。", "info");
+    try {
+      await invoke("save_api_provider_connection", { providerId: id, name, baseUrl, apiKey: key || null });
+      selectedProviderId = id;
+      await load();
+      toast("连接已安全保存到 F 盘。现在可拉取模型或测试连接。", "success");
+    } catch (error) { toast(`保存连接失败：${String(error)}`, "error"); }
+  };
   const open = async () => {
     panel.classList.add("is-open");
     panel.querySelector(`[data-kind="${kind}"]`).classList.add("is-active");
@@ -229,6 +243,7 @@ export function installApiSettings() {
     }
     if (action === "close") panel.classList.remove("is-open");
     if (action === "new") newProvider();
+    if (action === "save-connection") { await saveConnection(); return; }
     if (action === "fetch-models") {
       const baseUrl = safeText(field("baseUrl").value);
       const key = field("key").value;

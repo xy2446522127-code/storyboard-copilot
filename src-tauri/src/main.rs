@@ -341,6 +341,10 @@ mod tests {
             2
         );
         assert!(strings_from_models(&serde_json::json!({"models":[]})).is_empty());
+        assert_eq!(
+            strings_from_models(&serde_json::json!({"data":{"models":[{"name":"nested"}]}})),
+            vec!["nested"]
+        );
     }
 
     #[test]
@@ -357,6 +361,14 @@ mod tests {
         assert_eq!(
             beta_only.iter().map(Url::as_str).collect::<Vec<_>>(),
             vec!["https://gateway.example/v1beta/models"]
+        );
+        let biglongxia = models_endpoints("https://api.biglongxia.cn/v1").unwrap();
+        assert_eq!(
+            biglongxia.iter().map(Url::as_str).collect::<Vec<_>>(),
+            vec![
+                "https://api.biglongxia.cn/v1beta/models",
+                "https://api.biglongxia.cn/v1/models"
+            ]
         );
     }
 
@@ -584,15 +596,24 @@ fn models_endpoints(base_url: &str) -> Result<Vec<Url>, String> {
     let Some(beta_path) = beta_path else {
         return Ok(vec![standard]);
     };
-    let mut beta = base;
+    let mut beta = base.clone();
     beta.set_path(&beta_path);
     beta.set_query(None);
     beta.set_fragment(None);
     if beta == standard {
-        Ok(vec![standard])
-    } else {
-        Ok(vec![standard, beta])
+        return Ok(vec![standard]);
     }
+    // This gateway documents its catalogue at `/v1beta/models`, while its
+    // generation endpoints remain under `/v1`. Probe the documented route
+    // first; all other compatible providers keep the standard route first.
+    let beta_first = base
+        .host_str()
+        .is_some_and(|host| host.eq_ignore_ascii_case("api.biglongxia.cn"));
+    Ok(if beta_first {
+        vec![beta, standard]
+    } else {
+        vec![standard, beta]
+    })
 }
 
 /// Normalizes a key copied from an OpenAI-compatible provider without ever
@@ -805,11 +826,19 @@ fn provider_credentials(app: &AppHandle, provider_id: &str) -> Result<(String, S
 }
 
 fn strings_from_models(value: &serde_json::Value) -> Vec<String> {
-    let values = value
-        .get("data")
-        .and_then(serde_json::Value::as_array)
-        .or_else(|| value.get("models").and_then(serde_json::Value::as_array))
-        .or_else(|| value.as_array());
+    // Gateways return several harmless variants of the OpenAI model-list
+    // envelope. Accept nested catalogues too, rather than treating a valid
+    // `{ data: { models: [...] } }` response as an empty list.
+    let values = [
+        value.get("data").and_then(serde_json::Value::as_array),
+        value.get("models").and_then(serde_json::Value::as_array),
+        value.pointer("/data/models").and_then(serde_json::Value::as_array),
+        value.pointer("/data/data").and_then(serde_json::Value::as_array),
+        value.as_array(),
+    ]
+    .into_iter()
+    .flatten()
+    .next();
     let mut models: Vec<String> = values
         .into_iter()
         .flatten()
@@ -4788,6 +4817,66 @@ fn register_custom_provider(
     write_json(settings_path(&app)?, &settings)
 }
 
+/// Saves a provider connection before its model categories are known. This
+/// stores only endpoint metadata and the native F-drive credential; models are
+/// added separately after a successful fetch or deliberate manual entry.
+#[tauri::command]
+fn save_api_provider_connection(
+    app: AppHandle,
+    provider_id: String,
+    name: String,
+    base_url: String,
+    api_key: Option<String>,
+    lock: State<StoreLock>,
+) -> Result<(), String> {
+    let provider_id = provider_id.trim();
+    let name = name.trim();
+    let base_url = base_url.trim().trim_end_matches('/');
+    if provider_id.is_empty()
+        || !provider_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    {
+        return Err("service id may only contain letters, numbers, '_' or '-'".to_string());
+    }
+    if name.is_empty() {
+        return Err("service name is required".to_string());
+    }
+    let endpoint = Url::parse(base_url).map_err(|error| format!("invalid base URL: {error}"))?;
+    if !matches!(endpoint.scheme(), "http" | "https") {
+        return Err("service address must use HTTP or HTTPS".to_string());
+    }
+    let _guard = lock
+        .0
+        .lock()
+        .map_err(|_| "settings store lock poisoned".to_string())?;
+    let mut settings: Settings = read_json(settings_path(&app)?)?;
+    let existing = settings
+        .custom_providers
+        .iter()
+        .find(|provider| provider.get("id").and_then(serde_json::Value::as_str) == Some(provider_id));
+    let models = merge_provider_models(existing, &[]);
+    settings
+        .custom_providers
+        .retain(|provider| provider.get("id").and_then(serde_json::Value::as_str) != Some(provider_id));
+    settings.custom_providers.push(serde_json::json!({
+        "id": provider_id,
+        "name": name,
+        "base_url": base_url,
+        "models": models,
+    }));
+    settings
+        .base_urls
+        .insert(provider_id.to_string(), base_url.to_string());
+    if let Some(api_key) = api_key {
+        let api_key = normalize_api_key(&api_key);
+        if !api_key.is_empty() {
+            settings.api_keys.insert(provider_id.to_string(), api_key);
+        }
+    }
+    write_json(settings_path(&app)?, &settings)
+}
+
 #[tauri::command]
 fn unregister_custom_provider(
     app: AppHandle,
@@ -6220,6 +6309,7 @@ fn main() {
             save_settings_json,
             load_settings_json,
             register_custom_provider,
+            save_api_provider_connection,
             unregister_custom_provider,
             list_models,
             list_api_provider_settings,
