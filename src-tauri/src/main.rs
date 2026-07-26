@@ -204,7 +204,10 @@ mod tests {
     #[test]
     fn provider_model_categories_are_merged_without_duplicates() {
         let existing = serde_json::json!({"models": ["image-model", "shared-model"]});
-        let incoming = vec![serde_json::json!("chat-model"), serde_json::json!("shared-model")];
+        let incoming = vec![
+            serde_json::json!("chat-model"),
+            serde_json::json!("shared-model"),
+        ];
         assert_eq!(
             merge_provider_models(Some(&existing), &incoming),
             vec!["image-model", "shared-model", "chat-model"]
@@ -251,6 +254,23 @@ mod tests {
             2
         );
         assert_eq!(remote_model_count(&serde_json::json!({"models":[]})), 0);
+    }
+
+    #[test]
+    fn model_endpoint_probe_includes_v1beta_gateway_compatibility() {
+        let endpoints = models_endpoints("https://gateway.example/v1").unwrap();
+        assert_eq!(
+            endpoints.iter().map(Url::as_str).collect::<Vec<_>>(),
+            vec![
+                "https://gateway.example/v1/models",
+                "https://gateway.example/v1beta/models"
+            ]
+        );
+        let beta_only = models_endpoints("https://gateway.example/v1beta").unwrap();
+        assert_eq!(
+            beta_only.iter().map(Url::as_str).collect::<Vec<_>>(),
+            vec!["https://gateway.example/v1beta/models"]
+        );
     }
 
     #[test]
@@ -447,6 +467,7 @@ fn models_endpoint(base_url: &str) -> Result<Url, String> {
     }
     let mut normalized = base.to_string().trim_end_matches('/').to_string();
     if !normalized.ends_with("/v1")
+        && !normalized.ends_with("/v1beta")
         && !normalized.ends_with("/v2")
         && !normalized.ends_with("/v3")
         && !normalized.ends_with("/api/v3")
@@ -454,6 +475,34 @@ fn models_endpoint(base_url: &str) -> Result<Url, String> {
         normalized.push_str("/v1");
     }
     Url::parse(&format!("{normalized}/models")).map_err(|error| error.to_string())
+}
+
+/// Resolves the conventional OpenAI endpoint first, then the documented
+/// `v1beta/models` compatibility endpoint used by a few OpenAI-compatible
+/// gateways. Both requests are read-only model-list probes; no generation or
+/// billable request is created here.
+fn models_endpoints(base_url: &str) -> Result<Vec<Url>, String> {
+    let standard = models_endpoint(base_url)?;
+    let base = Url::parse(base_url.trim()).map_err(|error| format!("invalid base URL: {error}"))?;
+    let path = base.path().trim_end_matches('/');
+    let beta_path = if path.is_empty() {
+        Some("/v1beta/models".to_string())
+    } else {
+        path.strip_suffix("/v1")
+            .map(|prefix| format!("{prefix}/v1beta/models"))
+    };
+    let Some(beta_path) = beta_path else {
+        return Ok(vec![standard]);
+    };
+    let mut beta = base;
+    beta.set_path(&beta_path);
+    beta.set_query(None);
+    beta.set_fragment(None);
+    if beta == standard {
+        Ok(vec![standard])
+    } else {
+        Ok(vec![standard, beta])
+    }
 }
 
 /// Normalizes a key copied from an OpenAI-compatible provider without ever
@@ -465,9 +514,15 @@ fn normalize_api_key(value: &str) -> String {
     let cleaned = value
         .trim_matches(|character: char| {
             character.is_whitespace()
-                || matches!(character, '\u{feff}' | '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}')
+                || matches!(
+                    character,
+                    '\u{feff}' | '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}'
+                )
         })
-        .replace(['\u{feff}', '\u{200b}', '\u{200c}', '\u{200d}', '\u{2060}'], "");
+        .replace(
+            ['\u{feff}', '\u{200b}', '\u{200c}', '\u{200d}', '\u{2060}'],
+            "",
+        );
     let without_bearer = cleaned
         .get(..7)
         .filter(|prefix| prefix.eq_ignore_ascii_case("bearer "))
@@ -569,10 +624,7 @@ fn image_results_from_response(value: &serde_json::Value) -> Vec<String> {
         .and_then(serde_json::Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or_else(|| std::slice::from_ref(value));
-    items
-        .iter()
-        .filter_map(image_result_from_item)
-        .collect()
+    items.iter().filter_map(image_result_from_item).collect()
 }
 
 fn image_result_from_response(value: &serde_json::Value) -> Option<String> {
@@ -792,7 +844,12 @@ fn persist_generated_image_results(
 fn image_job_results_from_metadata(metadata: &str) -> Vec<String> {
     serde_json::from_str::<serde_json::Value>(metadata)
         .ok()
-        .and_then(|value| value.get("results").and_then(serde_json::Value::as_array).cloned())
+        .and_then(|value| {
+            value
+                .get("results")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+        })
         .unwrap_or_default()
         .into_iter()
         .filter_map(|value| value.as_str().map(ToOwned::to_owned))
@@ -818,7 +875,10 @@ fn record_image_job_results(job: &mut GenerationJob, results: Vec<String>) {
         metadata = serde_json::json!({});
     }
     metadata["results"] = serde_json::Value::Array(
-        all_results.into_iter().map(serde_json::Value::String).collect(),
+        all_results
+            .into_iter()
+            .map(serde_json::Value::String)
+            .collect(),
     );
     job.request_json = metadata.to_string();
 }
@@ -4405,7 +4465,9 @@ fn load_settings_json(app: AppHandle, lock: State<StoreLock>) -> Result<String, 
 
 fn contains_api_key_like_token(value: &str) -> bool {
     value
-        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-' && character != '_')
+        .split(|character: char| {
+            !character.is_ascii_alphanumeric() && character != '-' && character != '_'
+        })
         .any(|token| token.starts_with("sk-") && token.len() >= 20)
 }
 
@@ -4439,7 +4501,10 @@ fn save_chat_system_prompt(
     Ok(())
 }
 
-fn merge_provider_models(existing: Option<&serde_json::Value>, incoming: &[serde_json::Value]) -> Vec<String> {
+fn merge_provider_models(
+    existing: Option<&serde_json::Value>,
+    incoming: &[serde_json::Value],
+) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut merged = Vec::new();
     let existing_models = existing
@@ -4448,7 +4513,11 @@ fn merge_provider_models(existing: Option<&serde_json::Value>, incoming: &[serde
         .into_iter()
         .flatten();
     for model in existing_models.chain(incoming.iter()) {
-        let Some(model) = model.as_str().map(str::trim).filter(|model| !model.is_empty()) else {
+        let Some(model) = model
+            .as_str()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+        else {
             continue;
         };
         if seen.insert(model.to_string()) {
@@ -4726,29 +4795,51 @@ async fn list_remote_models(base_url: String, api_key: String) -> Result<Vec<Str
     if api_key.is_empty() {
         return Err("请先填写 API Key".to_string());
     }
-    let endpoint = models_endpoint(&base_url)?;
-    let response = Client::new()
-        .get(endpoint)
-        .bearer_auth(api_key)
-        .header("Accept", "application/json")
-        .send()
-        .await
-        .map_err(|error| format!("获取模型失败: {error}"))?;
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|error| format!("读取模型响应失败: {error}"))?;
-    if !status.is_success() {
-        return Err(format!("获取模型失败 ({status})"));
+    let client = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| format!("无法创建模型请求客户端: {error}"))?;
+    let mut last_error = "模型接口没有返回可用模型".to_string();
+    for endpoint in models_endpoints(&base_url)? {
+        let response = match client
+            .get(endpoint)
+            .bearer_auth(&api_key)
+            .header("Accept", "application/json")
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                last_error = format!("获取模型失败: {error}");
+                continue;
+            }
+        };
+        let status = response.status();
+        let body = match response.text().await {
+            Ok(body) => body,
+            Err(error) => {
+                last_error = format!("读取模型响应失败: {error}");
+                continue;
+            }
+        };
+        if !status.is_success() {
+            last_error = format!("获取模型失败 ({status})");
+            continue;
+        }
+        let value: serde_json::Value = match serde_json::from_str(&body) {
+            Ok(value) => value,
+            Err(error) => {
+                last_error = format!("模型响应不是 JSON: {error}");
+                continue;
+            }
+        };
+        let models = strings_from_models(&value);
+        if !models.is_empty() {
+            return Ok(models);
+        }
+        last_error = "模型接口没有返回可用模型".to_string();
     }
-    let models = strings_from_models(
-        &serde_json::from_str(&body).map_err(|error| format!("模型响应不是 JSON: {error}"))?,
-    );
-    if models.is_empty() {
-        return Err("模型接口没有返回可用模型".to_string());
-    }
-    Ok(models)
+    Err(last_error)
 }
 
 /// Loads `/models` using credentials that are already stored on F:.  The key
@@ -4773,28 +4864,7 @@ async fn test_api_provider_connection(
     provider_id: String,
 ) -> Result<usize, String> {
     let (base_url, api_key) = provider_credentials(&app, &provider_id)?;
-    let endpoint = models_endpoint(&base_url)?;
-    let response = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|error| format!("无法创建连接测试客户端: {error}"))?
-        .get(endpoint)
-        .bearer_auth(api_key)
-        .header("Accept", "application/json")
-        .send()
-        .await
-        .map_err(|error| format!("连接失败: {error}"))?;
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|error| format!("读取连接测试响应失败: {error}"))?;
-    if !status.is_success() {
-        return Err(format!("连接测试失败 ({status})"));
-    }
-    let value: serde_json::Value =
-        serde_json::from_str(&body).map_err(|error| format!("模型响应不是 JSON: {error}"))?;
-    Ok(remote_model_count(&value))
+    Ok(list_remote_models(base_url, api_key).await?.len())
 }
 
 #[tauri::command]
@@ -5177,10 +5247,8 @@ fn save_background_image_job(app: &AppHandle, job: &GenerationJob) {
 
 fn cancel_background_image_job_record(job: &mut GenerationJob) {
     job.status = "cancelled".to_string();
-    job.error = Some(
-        "已停止本地等待。若服务商已接收请求，远端仍可能继续处理并产生费用。"
-            .to_string(),
-    );
+    job.error =
+        Some("已停止本地等待。若服务商已接收请求，远端仍可能继续处理并产生费用。".to_string());
     job.updated_at = Utc::now().to_rfc3339();
 }
 
@@ -5232,10 +5300,15 @@ async fn run_background_image_job(
                 job.error = Some(format!("生图请求失败（{status}）"));
             } else {
                 match response.json::<serde_json::Value>().await {
-                    Ok(_value) if cancel.is_cancelled() => cancel_background_image_job_record(&mut job),
+                    Ok(_value) if cancel.is_cancelled() => {
+                        cancel_background_image_job_record(&mut job)
+                    }
                     Ok(value) => {
                         job.remote_job_id = remote_job_id_from_response(&value);
-                        match persist_generated_image_results(&app, image_results_from_response(&value)) {
+                        match persist_generated_image_results(
+                            &app,
+                            image_results_from_response(&value),
+                        ) {
                             Ok(results) => {
                                 record_image_job_results(&mut job, results);
                                 job.status = if job.result.is_some() {
@@ -5397,10 +5470,7 @@ fn list_generate_image_jobs(
             && !active_job_ids.contains(&job.job_id)
         {
             job.status = "failed".to_string();
-            job.error = Some(
-                "应用在服务商返回任务编号前已关闭。请复用参数后重试。"
-                    .to_string(),
-            );
+            job.error = Some("应用在服务商返回任务编号前已关闭。请复用参数后重试。".to_string());
             job.updated_at = Utc::now().to_rfc3339();
             save_generation_job(&connection, job)?;
         }
