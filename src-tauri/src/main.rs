@@ -4662,6 +4662,19 @@ async fn list_remote_models(base_url: String, api_key: String) -> Result<Vec<Str
     Ok(models)
 }
 
+/// Loads `/models` using credentials that are already stored on F:.  The key
+/// remains in the native process and is never sent back to the WebView, which
+/// lets API Settings refresh a saved provider without asking the user to paste
+/// the same secret again.
+#[tauri::command]
+async fn list_saved_provider_models(
+    app: AppHandle,
+    provider_id: String,
+) -> Result<Vec<String>, String> {
+    let (base_url, api_key) = provider_credentials(&app, &provider_id)?;
+    list_remote_models(base_url, api_key).await
+}
+
 /// Tests an already-saved provider without returning its base URL or key to the
 /// WebView.  `/models` is a cheap OpenAI-compatible capability probe and avoids
 /// any paid generation request.
@@ -5841,6 +5854,7 @@ fn main() {
             save_api_model_catalog,
             list_configured_models,
             list_remote_models,
+            list_saved_provider_models,
             test_api_provider_connection,
             auth_login,
             auth_register,

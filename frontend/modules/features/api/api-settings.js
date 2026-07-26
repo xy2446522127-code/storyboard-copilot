@@ -215,9 +215,16 @@ export function installApiSettings() {
     if (action === "fetch-models") {
       const baseUrl = safeText(field("baseUrl").value);
       const key = field("key").value;
-      if (!baseUrl || !key) return toast("请先填写服务地址和本次 API Key，再拉取模型。", "info");
+      if (!baseUrl) return toast("请先填写服务地址，再拉取模型。", "info");
+      if (!key && !selectedProviderId) return toast("新服务需要先填写本次 API Key，再拉取模型。", "info");
+      const savedProvider = providers.find((provider) => provider.id === selectedProviderId);
+      if (!key && savedProvider && baseUrl.replace(/\/$/, "") !== String(savedProvider.base_url || "").replace(/\/$/, "")) {
+        return toast("服务地址已修改；请先保存，或填写本次 API Key 后再拉取模型。", "info");
+      }
       try {
-        const models = await invoke("list_remote_models", { baseUrl, apiKey: key });
+        const models = key
+          ? await invoke("list_remote_models", { baseUrl, apiKey: key })
+          : await invoke("list_saved_provider_models", { providerId: selectedProviderId });
         field("models").value = models.join("\n");
         toast(`已获取 ${models.length} 个模型。`, "success");
       } catch (error) { toast(`获取模型失败：${String(error)}`, "error"); }
