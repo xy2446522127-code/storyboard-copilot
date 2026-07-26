@@ -133,6 +133,13 @@ mod tests {
     }
 
     #[test]
+    fn system_prompt_key_guard_rejects_only_key_shaped_tokens() {
+        assert!(!contains_api_key_like_token("Write a task-based outline."));
+        let key_shaped_text = format!("never paste {}{} into chat", "sk-", "abcdefghijklmnopqrst");
+        assert!(contains_api_key_like_token(&key_shaped_text));
+    }
+
+    #[test]
     fn image_response_extracts_inline_payload_for_f_drive_persistence() {
         let response = serde_json::json!({"data":[{"b64_json":"QUJDRA=="}]});
         assert_eq!(
@@ -349,6 +356,8 @@ struct ChatSession {
     model: String,
     #[serde(default)]
     provider_id: String,
+    #[serde(default)]
+    system_prompt: String,
     created_at: String,
     updated_at: String,
 }
@@ -1187,6 +1196,7 @@ fn open_projects(app: &AppHandle) -> Result<Connection, String> {
                 project_id TEXT,
                 title TEXT NOT NULL,
                 model TEXT NOT NULL DEFAULT '',
+                system_prompt TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -1232,6 +1242,10 @@ fn open_projects(app: &AppHandle) -> Result<Connection, String> {
     // Additive migrations keep every existing local chat readable.
     let _ = connection.execute(
         "ALTER TABLE chat_sessions ADD COLUMN provider_id TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = connection.execute(
+        "ALTER TABLE chat_sessions ADD COLUMN system_prompt TEXT NOT NULL DEFAULT ''",
         [],
     );
     let _ = connection.execute(
@@ -2326,8 +2340,9 @@ fn row_to_chat_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatSession>
         title: row.get(2)?,
         model: row.get(3)?,
         provider_id: row.get(4)?,
-        created_at: row.get(5)?,
-        updated_at: row.get(6)?,
+        system_prompt: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
     })
 }
 
@@ -2757,10 +2772,10 @@ fn list_chat_sessions(
     let connection = open_projects(&app)?;
     let mut statement = match project_id {
         Some(_) => connection
-            .prepare("SELECT id, project_id, title, model, provider_id, created_at, updated_at FROM chat_sessions WHERE project_id = ?1 ORDER BY updated_at DESC")
+            .prepare("SELECT id, project_id, title, model, provider_id, system_prompt, created_at, updated_at FROM chat_sessions WHERE project_id = ?1 ORDER BY updated_at DESC")
             .map_err(|error| error.to_string())?,
         None => connection
-            .prepare("SELECT id, project_id, title, model, provider_id, created_at, updated_at FROM chat_sessions WHERE project_id IS NULL ORDER BY updated_at DESC")
+            .prepare("SELECT id, project_id, title, model, provider_id, system_prompt, created_at, updated_at FROM chat_sessions WHERE project_id IS NULL ORDER BY updated_at DESC")
             .map_err(|error| error.to_string())?,
     };
     let rows = match project_id {
@@ -2794,19 +2809,21 @@ fn create_chat_session(
             .unwrap_or_else(|| "新对话".to_string()),
         model: model.unwrap_or_default(),
         provider_id: provider_id.unwrap_or_default(),
+        system_prompt: String::new(),
         created_at: now.clone(),
         updated_at: now,
     };
     open_projects(&app)?
         .execute(
-            "INSERT INTO chat_sessions (id, project_id, title, model, provider_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO chat_sessions (id, project_id, title, model, provider_id, system_prompt, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 session.id,
                 session.project_id,
                 session.title,
                 session.model,
                 session.provider_id,
+                session.system_prompt,
                 session.created_at,
                 session.updated_at
             ],
@@ -4347,6 +4364,42 @@ fn load_settings_json(app: AppHandle, lock: State<StoreLock>) -> Result<String, 
     }
 }
 
+fn contains_api_key_like_token(value: &str) -> bool {
+    value
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-' && character != '_')
+        .any(|token| token.starts_with("sk-") && token.len() >= 20)
+}
+
+#[tauri::command]
+fn save_chat_system_prompt(
+    app: AppHandle,
+    session_id: String,
+    system_prompt: String,
+    lock: State<StoreLock>,
+) -> Result<(), String> {
+    let system_prompt = system_prompt.trim();
+    if system_prompt.chars().count() > 8_000 {
+        return Err("system prompt must be at most 8000 characters".to_string());
+    }
+    if contains_api_key_like_token(system_prompt) {
+        return Err("system prompt must not contain an API key".to_string());
+    }
+    let _guard = lock
+        .0
+        .lock()
+        .map_err(|_| "project store lock poisoned".to_string())?;
+    let changed = open_projects(&app)?
+        .execute(
+            "UPDATE chat_sessions SET system_prompt = ?1, updated_at = ?2 WHERE id = ?3",
+            params![system_prompt, Utc::now().to_rfc3339(), session_id],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed == 0 {
+        return Err("chat session not found".to_string());
+    }
+    Ok(())
+}
+
 fn merge_provider_models(existing: Option<&serde_json::Value>, incoming: &[serde_json::Value]) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut merged = Vec::new();
@@ -5827,6 +5880,7 @@ fn main() {
             list_chat_sessions,
             create_chat_session,
             rename_chat_session,
+            save_chat_system_prompt,
             delete_chat_session,
             list_chat_messages,
             send_chat_message,

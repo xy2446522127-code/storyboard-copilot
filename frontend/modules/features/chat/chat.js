@@ -107,6 +107,7 @@ export function installChatPanel({ openApiSettings } = {}) {
   const sessionsNode = panel.querySelector("[data-sessions]");
   const modelNode = panel.querySelector('[data-field="model"]');
   const messageInput = panel.querySelector('[data-field="message"]');
+  const systemInput = panel.querySelector('[data-field="system"]');
   const attachmentInput = panel.querySelector('[data-field="attachments"]');
   const attachmentList = panel.querySelector("[data-attachments]");
   let session = null;
@@ -213,6 +214,14 @@ export function installChatPanel({ openApiSettings } = {}) {
     session = await invoke("create_chat_session", { projectId, title: projectId ? "项目创作对话" : "新对话", model: model || "", providerId: providerId || "" });
     await loadSessions();
     return session;
+  };
+  const saveSystemPrompt = async () => {
+    if (!session) return;
+    await invoke("save_chat_system_prompt", {
+      sessionId: session.id,
+      systemPrompt: safeText(systemInput.value),
+    });
+    session.systemPrompt = safeText(systemInput.value);
   };
   const setBusy = (value) => {
     inFlight = value;
@@ -326,6 +335,7 @@ export function installChatPanel({ openApiSettings } = {}) {
     setBusy(true);
     try {
       await ensureSession();
+      await saveSystemPrompt();
       const context = panel.querySelector('[data-field="context"]').checked ? nodeContext() : {};
       const preparedAttachments = attachments.length ? await invoke("prepare_chat_attachments", {
         attachments: await Promise.all(attachments.map(async (file) => ({ source: await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(new Error(`无法读取 ${file.name}`)); reader.readAsDataURL(file); }), fileName: file.name }))),
@@ -360,7 +370,11 @@ export function installChatPanel({ openApiSettings } = {}) {
     const deleteId = event.target.closest("[data-delete]")?.dataset.delete;
     const removeAttachment = event.target.closest("[data-remove-attachment]")?.dataset.removeAttachment;
     if (removeAttachment !== undefined) { attachments.splice(Number(removeAttachment), 1); updateAttachments(); return; }
-    if (sessionId) { session = (await invoke("list_chat_sessions", { projectId })).find((item) => item.id === sessionId) || null; await loadMessages(); await loadSessions(); }
+    if (sessionId) {
+      session = (await invoke("list_chat_sessions", { projectId })).find((item) => item.id === sessionId) || null;
+      systemInput.value = session?.systemPrompt || "";
+      await loadMessages(); await loadSessions();
+    }
     if (renameId) {
       const item = (await invoke("list_chat_sessions", { projectId })).find((entry) => entry.id === renameId);
       const title = window.prompt("会话名称", item?.title || "");
@@ -376,7 +390,7 @@ export function installChatPanel({ openApiSettings } = {}) {
     }
     if (action === "close") panel.classList.remove("is-open");
     if (action === "attach") attachmentInput.click();
-    if (action === "new") { session = null; messages.replaceChildren(); await ensureSession(); }
+    if (action === "new") { session = null; systemInput.value = ""; messages.replaceChildren(); await ensureSession(); }
     if (action === "refresh") { await loadModels(); await loadSessions(); }
     if (action === "retry" && lastUserText) send(lastUserText);
     if (action === "cancel" && inFlight && activeRequestId) {
@@ -391,6 +405,10 @@ export function installChatPanel({ openApiSettings } = {}) {
     if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
     event.preventDefault();
     send();
+  });
+  systemInput.addEventListener("change", async () => {
+    try { await saveSystemPrompt(); }
+    catch (error) { toast(`无法保存系统提示词：${String(error)}`, "error"); }
   });
   attachmentInput.addEventListener("change", () => { addAttachments(attachmentInput.files || []); attachmentInput.value = ""; });
   messageInput.addEventListener("paste", (event) => {
@@ -411,6 +429,7 @@ export function installChatPanel({ openApiSettings } = {}) {
         projectId = await invoke("find_project_for_canvas_selection", { nodeIds: selectedFlowNodeIds() });
         panel.querySelector("[data-scope]").textContent = projectId ? "当前项目会话" : "通用会话";
         session = null;
+        systemInput.value = "";
         await loadModels(); await loadSessions();
       } catch (error) { toast(`无法打开创作助手：${String(error)}`, "error"); }
       messageInput.focus();
