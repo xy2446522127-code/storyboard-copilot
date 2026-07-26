@@ -150,6 +150,7 @@ mod tests {
 
     #[test]
     fn only_f_drive_paths_are_accepted_for_user_output() {
+        assert!(is_f_drive_path(std::path::Path::new(PERSISTENT_DATA_ROOT)));
         assert!(is_f_drive_path(std::path::Path::new(
             r"F:\花海画布\exports"
         )));
@@ -609,13 +610,31 @@ fn normalized_catalog_models(
     Ok(normalized)
 }
 
+const PERSISTENT_DATA_ROOT: &str = r"F:\Huahaihuabu\花海画布-data";
+const LEGACY_INSTALL_ROOT: &str = r"F:\Huahaihuabu\花海画布";
+
+fn persistent_data_dir(name: &str) -> std::io::Result<PathBuf> {
+    let root = PathBuf::from(PERSISTENT_DATA_ROOT);
+    fs::create_dir_all(&root)?;
+    let target = root.join(name);
+    if target.exists() {
+        return Ok(target);
+    }
+    // Earlier builds kept mutable user data inside the NSIS installation folder.
+    // Move each directory exactly once, on the same F: volume, before opening it.
+    // `rename` is atomic on this volume and preserves every database, media file
+    // and WebView entry without routing user data through C:.
+    let legacy = PathBuf::from(LEGACY_INSTALL_ROOT).join(name);
+    if legacy.exists() {
+        fs::rename(legacy, &target)?;
+    }
+    fs::create_dir_all(&target)?;
+    Ok(target)
+}
+
 fn app_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let _ = app;
-    // User data and the WebView cache are intentionally kept on F:.  The application is
-    // designed as a local creative workspace and must not leave project data behind on C:.
-    let path = PathBuf::from(r"F:\Huahaihuabu\花海画布\data");
-    fs::create_dir_all(&path).map_err(|error| error.to_string())?;
-    Ok(path)
+    persistent_data_dir("data").map_err(|error| error.to_string())
 }
 
 fn projects_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -5330,10 +5349,12 @@ fn main() {
         .manage(ChatStreamState::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
-            let webview_data = PathBuf::from(r"F:\Huahaihuabu\花海画布\webview");
-            let runtime_temp = PathBuf::from(r"F:\Huahaihuabu\花海画布\update-tmp");
-            fs::create_dir_all(&webview_data)?;
-            fs::create_dir_all(&runtime_temp)?;
+            // Migrate all mutable state out of the installation directory before
+            // WebView or updater code touches it. This protects projects and
+            // saved API settings during both manual reinstalls and NSIS updates.
+            let _ = persistent_data_dir("data")?;
+            let webview_data = persistent_data_dir("webview")?;
+            let runtime_temp = persistent_data_dir("update-tmp")?;
             // Tauri's updater and its HTTP stack may create temporary files. Set
             // the process-level Windows temp variables before any updater action
             // so update downloads never fall back to the user's C: profile.
