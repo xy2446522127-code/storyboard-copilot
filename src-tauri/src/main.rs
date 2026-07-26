@@ -248,6 +248,87 @@ mod tests {
     }
 
     #[test]
+    fn blank_canvas_import_transaction_rolls_back_canvas_and_history_together() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE projects (
+                    id TEXT PRIMARY KEY, name TEXT, nodes_json TEXT, edges_json TEXT,
+                    viewport_json TEXT, history_json TEXT, image_pool_json TEXT,
+                    node_count INTEGER, created_at TEXT, updated_at TEXT
+                );
+                CREATE TABLE canvas_batch_history (
+                    id TEXT PRIMARY KEY, project_id TEXT, action TEXT,
+                    before_nodes_json TEXT, before_edges_json TEXT,
+                    after_nodes_json TEXT, after_edges_json TEXT,
+                    created_at TEXT, undone INTEGER NOT NULL DEFAULT 0
+                );",
+            )
+            .unwrap();
+        let project = ProjectRecord {
+            id: "project-1".to_string(),
+            name: "Test".to_string(),
+            nodes_json: "[]".to_string(),
+            edges_json: "[]".to_string(),
+            viewport_json: "{}".to_string(),
+            history_json: "[]".to_string(),
+            image_pool_json: "[]".to_string(),
+            node_count: 0,
+            created_at: "now".to_string(),
+            updated_at: "now".to_string(),
+        };
+        connection
+            .execute(
+                "INSERT INTO projects VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    &project.id,
+                    &project.name,
+                    &project.nodes_json,
+                    &project.edges_json,
+                    &project.viewport_json,
+                    &project.history_json,
+                    &project.image_pool_json,
+                    project.node_count,
+                    &project.created_at,
+                    &project.updated_at,
+                ],
+            )
+            .unwrap();
+        let before_nodes = Vec::new();
+        let after_nodes = vec![serde_json::json!({"id":"upload-1","type":"uploadNode"})];
+        {
+            let transaction = connection.transaction().unwrap();
+            write_project_canvas(&transaction, &project, &after_nodes, &[]).unwrap();
+            record_canvas_batch_history(
+                &transaction,
+                &project.id,
+                "blank-image-drop",
+                &before_nodes,
+                &[],
+                &after_nodes,
+                &[],
+            )
+            .unwrap();
+            // Dropping the transaction emulates a later import failure.
+        }
+        let (stored_nodes, stored_count): (String, u32) = connection
+            .query_row(
+                "SELECT nodes_json, node_count FROM projects WHERE id = 'project-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored_nodes, "[]");
+        assert_eq!(stored_count, 0);
+        let history_count: u32 = connection
+            .query_row("SELECT COUNT(*) FROM canvas_batch_history", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(history_count, 0);
+    }
+
+    #[test]
     fn model_response_extracts_openai_model_arrays() {
         assert_eq!(
             strings_from_models(&serde_json::json!({"data":[{"id":"one"},{"id":"two"}]})).len(),
@@ -357,6 +438,9 @@ struct BlankCanvasImageInput {
     source: String,
     file_name: String,
 }
+
+const MAX_BLANK_CANVAS_IMAGE_COUNT: usize = 20;
+const MAX_BLANK_CANVAS_IMAGE_SOURCE_BYTES: usize = 84 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -4148,8 +4232,15 @@ fn append_blank_canvas_images(
     y: f64,
     lock: State<StoreLock>,
 ) -> Result<ProjectRecord, String> {
-    if images.is_empty() || images.len() > 20 {
+    if images.is_empty() || images.len() > MAX_BLANK_CANVAS_IMAGE_COUNT {
         return Err("drop between 1 and 20 images at a time".to_string());
+    }
+    let source_bytes = images.iter().map(|image| image.source.len()).sum::<usize>();
+    if source_bytes > MAX_BLANK_CANVAS_IMAGE_SOURCE_BYTES {
+        return Err(
+            "the dropped images are too large to import together; split them into smaller batches"
+                .to_string(),
+        );
     }
     if !x.is_finite() || !y.is_finite() {
         return Err("invalid canvas drop position".to_string());
@@ -4158,70 +4249,80 @@ fn append_blank_canvas_images(
         .0
         .lock()
         .map_err(|_| "project store lock poisoned".to_string())?;
-    let connection = open_projects(&app)?;
+    let mut connection = open_projects(&app)?;
     let project = get_project_record_from_db(&connection, &project_id)?
         .ok_or("project not found".to_string())?;
     let mut nodes = project_nodes(&project)?;
     let edges = project_edges(&project)?;
     let before_nodes = nodes.clone();
     let before_edges = edges.clone();
-
-    for (index, image) in images.into_iter().enumerate() {
-        if image.file_name.trim().is_empty() || image.file_name.len() > 240 {
-            return Err("image file name is invalid".to_string());
-        }
-        if !image.source.starts_with("data:image/") || image.source.len() > 42_000_000 {
-            return Err("only image files up to 30 MB may be dropped".to_string());
-        }
-        let path = persist_media_source(&app, "images", image.source)?;
-        let decoded = match image::open(&path) {
-            Ok(decoded) => decoded,
-            Err(error) => {
-                let _ = fs::remove_file(&path);
-                return Err(format!("cannot read dropped image: {error}"));
+    let mut created_media = Vec::<PathBuf>::new();
+    let result = (|| -> Result<ProjectRecord, String> {
+        for (index, image) in images.into_iter().enumerate() {
+            if image.file_name.trim().is_empty() || image.file_name.len() > 240 {
+                return Err("image file name is invalid".to_string());
             }
-        };
-        let (width, height) = decoded.dimensions();
-        let preview_path = if width.max(height) > 1600 {
-            let preview_image = decoded.thumbnail(1600, 1600);
-            let preview_file =
-                media_dir(&app, "previews")?.join(format!("preview_{}.png", Uuid::new_v4()));
-            preview_image
-                .save(&preview_file)
-                .map_err(|error| format!("cannot save image preview: {error}"))?;
-            preview_file.display().to_string()
-        } else {
-            path.clone()
-        };
-        let column = (index % 3) as f64;
-        let row = (index / 3) as f64;
-        nodes.push(serde_json::json!({
-            "id": format!("upload-{}", Uuid::new_v4()),
-            "type": "uploadNode",
-            "position": {"x": x + column * 368.0, "y": y + row * 300.0},
-            "data": {
-                "displayName": image.file_name,
-                "imageUrl": path,
-                "previewImageUrl": preview_path,
-                "aspectRatio": "1:1",
-                "isSizeManuallyAdjusted": true,
-                "sourceFileName": image.file_name,
-                "imageWidth": width,
-                "imageHeight": height
+            if !image.source.starts_with("data:image/") || image.source.len() > 42_000_000 {
+                return Err("only image files up to 30 MB may be dropped".to_string());
             }
-        }));
+            let path = persist_media_source(&app, "images", image.source)?;
+            let path_buf = PathBuf::from(&path);
+            created_media.push(path_buf.clone());
+            let decoded = image::open(&path)
+                .map_err(|error| format!("cannot read dropped image: {error}"))?;
+            let (width, height) = decoded.dimensions();
+            let preview_path = if width.max(height) > 1600 {
+                let preview_image = decoded.thumbnail(1600, 1600);
+                let preview_file =
+                    media_dir(&app, "previews")?.join(format!("preview_{}.png", Uuid::new_v4()));
+                created_media.push(preview_file.clone());
+                preview_image
+                    .save(&preview_file)
+                    .map_err(|error| format!("cannot save image preview: {error}"))?;
+                preview_file.display().to_string()
+            } else {
+                path.clone()
+            };
+            let column = (index % 3) as f64;
+            let row = (index / 3) as f64;
+            nodes.push(serde_json::json!({
+                "id": format!("upload-{}", Uuid::new_v4()),
+                "type": "uploadNode",
+                "position": {"x": x + column * 368.0, "y": y + row * 300.0},
+                "data": {
+                    "displayName": image.file_name,
+                    "imageUrl": path,
+                    "previewImageUrl": preview_path,
+                    "aspectRatio": "1:1",
+                    "isSizeManuallyAdjusted": true,
+                    "sourceFileName": image.file_name,
+                    "imageWidth": width,
+                    "imageHeight": height
+                }
+            }));
+        }
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        let updated = write_project_canvas(&transaction, &project, &nodes, &edges)?;
+        record_canvas_batch_history(
+            &transaction,
+            &project_id,
+            "blank-image-drop",
+            &before_nodes,
+            &before_edges,
+            &nodes,
+            &edges,
+        )?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(updated)
+    })();
+    if result.is_err() {
+        for path in created_media {
+            let _ = fs::remove_file(path);
+        }
     }
-    let updated = write_project_canvas(&connection, &project, &nodes, &edges)?;
-    record_canvas_batch_history(
-        &connection,
-        &project_id,
-        "blank-image-drop",
-        &before_nodes,
-        &before_edges,
-        &nodes,
-        &edges,
-    )?;
-    Ok(updated)
+    result
 }
 
 /// Adds an image produced by the optional online-image workspace using the same

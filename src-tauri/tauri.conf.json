@@ -1,6 +1,6 @@
 {
   "productName": "花海画布",
-  "version": "5.9.5",
+  "version": "5.9.6",
   "identifier": "com.huahai.canvas",
   "build": { "frontendDist": "../frontend" },
   "app": { "security": { "csp": null } },

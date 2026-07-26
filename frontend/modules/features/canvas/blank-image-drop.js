@@ -2,6 +2,10 @@ import { invoke, toast } from "../../shared/tauri.js";
 
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp", "image/tiff", "image/avif"]);
 const MAX_FILE_BYTES = 30 * 1024 * 1024;
+// Data URLs are roughly one third larger than their files. Keep a batch below a
+// predictable transfer budget so the optional compatibility plug-in cannot
+// freeze the recovered canvas while serializing a huge message to Tauri.
+const MAX_BATCH_BYTES = 60 * 1024 * 1024;
 
 function canvasPane(target) {
   const pane = target.closest(".react-flow__pane, .xyflow__pane, .react-flow, .xyflow");
@@ -82,6 +86,8 @@ export function installBlankCanvasImageDrop() {
     if (files.length > 20) return toast("一次最多拖入 20 张图片。", "error");
     const tooLarge = files.find((file) => file.size > MAX_FILE_BYTES);
     if (tooLarge) return toast(`${tooLarge.name} 超过 30 MB，未导入。`, "error");
+    const totalBytes = files.reduce((total, file) => total + file.size, 0);
+    if (totalBytes > MAX_BATCH_BYTES) return toast("本次图片总量超过 60 MB。请分批拖入，避免画布卡顿。", "error");
     importing = true;
     try {
       // Saving through the legacy button is the compatibility boundary: the old
