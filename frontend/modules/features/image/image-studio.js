@@ -1,6 +1,18 @@
 import { invoke, safeText, toast } from "../../shared/tauri.js";
 
 const maxReferenceBytes = 10 * 1024 * 1024;
+const presetsStorageKey = "huahai-image-presets-v1";
+
+function loadPresets() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(presetsStorageKey) || "[]");
+    return Array.isArray(stored) ? stored.filter((preset) => preset && typeof preset.name === "string").slice(0, 30) : [];
+  } catch { return []; }
+}
+
+function savePresets(presets) {
+  localStorage.setItem(presetsStorageKey, JSON.stringify(presets.slice(0, 30)));
+}
 
 function readFile(file) {
   return new Promise((resolve, reject) => {
@@ -26,6 +38,7 @@ export function installImageStudio({ openApiSettings } = {}) {
       <header><div><strong>在线生图</strong><span data-model-hint>从 API 设置选择模型</span></div><button type="button" data-action="close">×</button></header>
       <div class="huahai-image__body">
         <form data-form>
+          <div class="huahai-image__presets"><select data-field="preset" aria-label="提示词预设"></select><button type="button" data-action="apply-preset">应用</button><button type="button" data-action="save-preset">存为预设</button><button type="button" data-action="delete-preset">删除</button></div>
           <label>正向提示词<textarea data-field="prompt" required placeholder="描述你想生成或编辑的画面…"></textarea></label>
           <label data-negative>负面提示词<textarea data-field="negative" placeholder="不希望出现的内容（模型支持时生效）"></textarea></label>
           <div class="huahai-image__references"><div><span>参考图</span><small>最多 4 张；每张不超过 10 MB</small></div><div data-ref-list></div><input data-field="files" type="file" accept="image/*" multiple hidden /><button type="button" data-action="pick-refs">添加参考图</button></div>
@@ -44,6 +57,7 @@ export function installImageStudio({ openApiSettings } = {}) {
   let models = [];
   let refs = [];
   let jobs = [];
+  let presets = loadPresets();
 
   const field = (name) => form.querySelector(`[data-field="${name}"]`);
   const selectedModel = () => models.find((model) => `${model.providerId}::${model.id}` === modelsNode.value);
@@ -52,9 +66,41 @@ export function installImageStudio({ openApiSettings } = {}) {
     refsNode.replaceChildren(...refs.map((ref, index) => {
       const item = document.createElement("div");
       item.className = "huahai-image__ref";
-      item.innerHTML = `<img src="${ref.preview}" alt="参考图 ${index + 1}" /><button type="button" data-remove-ref="${index}" title="移除">×</button>`;
+      item.innerHTML = `<img src="${ref.preview}" alt="参考图 ${index + 1}" /><div class="huahai-image__ref-actions"><button type="button" data-move-ref="${index}" data-direction="previous" title="前移" ${index === 0 ? "disabled" : ""}>←</button><button type="button" data-move-ref="${index}" data-direction="next" title="后移" ${index === refs.length - 1 ? "disabled" : ""}>→</button><button type="button" data-remove-ref="${index}" title="移除">×</button></div>`;
       return item;
     }));
+  };
+  const renderPresets = () => {
+    const select = field("preset");
+    select.replaceChildren(new Option("选择提示词预设…", ""), ...presets.map((preset) => new Option(preset.name, preset.id)));
+  };
+  const applyPreset = () => {
+    const preset = presets.find((item) => item.id === field("preset").value);
+    if (!preset) return toast("请选择要应用的预设。", "info");
+    field("prompt").value = preset.prompt || "";
+    field("negative").value = preset.negative || "";
+    for (const name of ["ratio", "resolution", "count", "seed"]) {
+      if (preset[name] !== undefined && field(name)) field(name).value = preset[name];
+    }
+    toast(`已应用预设“${preset.name}”。`, "success");
+  };
+  const savePreset = () => {
+    const prompt = safeText(field("prompt").value);
+    if (!prompt) return toast("先填写正向提示词，再保存预设。", "info");
+    const name = safeText(window.prompt("预设名称（不保存参考图和密钥）：", ""));
+    if (!name) return;
+    const id = crypto.randomUUID?.() || `preset-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const preset = { id, name: name.slice(0, 60), prompt, negative: safeText(field("negative").value), ratio: field("ratio").value, resolution: field("resolution").value, count: field("count").value, seed: field("seed").value };
+    presets = [preset, ...presets.filter((item) => item.name !== preset.name)].slice(0, 30);
+    savePresets(presets); renderPresets(); field("preset").value = preset.id;
+    toast("提示词预设已保存。", "success");
+  };
+  const deletePreset = () => {
+    const id = field("preset").value;
+    const preset = presets.find((item) => item.id === id);
+    if (!preset) return toast("请选择要删除的预设。", "info");
+    if (!window.confirm(`删除预设“${preset.name}”？这不会影响已经生成的结果。`)) return;
+    presets = presets.filter((item) => item.id !== id); savePresets(presets); renderPresets();
   };
   const renderCapabilities = () => {
     const hasModel = Boolean(selectedModel());
@@ -64,6 +110,7 @@ export function installImageStudio({ openApiSettings } = {}) {
     panel.querySelector("[data-model-hint]").textContent = !hasModel ? "请先在 API 设置配置图像模型" : (supports("multiReference") ? "支持多参考图" : "此模型仅支持第一张参考图");
   };
   const renderModels = async () => {
+    renderPresets();
     models = await invoke("list_configured_models", { kind: "image" });
     modelsNode.replaceChildren(...models.map((model) => {
       const option = document.createElement("option");
@@ -158,11 +205,20 @@ export function installImageStudio({ openApiSettings } = {}) {
   panel.addEventListener("click", async (event) => {
     const action = event.target.closest("[data-action]")?.dataset.action;
     const remove = event.target.closest("[data-remove-ref]")?.dataset.removeRef;
+    const move = event.target.closest("[data-move-ref]");
     if (remove !== undefined) { URL.revokeObjectURL(refs[Number(remove)]?.preview); refs.splice(Number(remove), 1); renderRefs(); }
+    if (move) {
+      const index = Number(move.dataset.moveRef);
+      const target = move.dataset.direction === "previous" ? index - 1 : index + 1;
+      if (Number.isInteger(index) && refs[target]) { [refs[index], refs[target]] = [refs[target], refs[index]]; renderRefs(); }
+    }
     if (action === "close") panel.classList.remove("is-open");
     if (action === "pick-refs") filesNode.click();
     if (action === "clear") { form.reset(); refs.forEach((ref) => URL.revokeObjectURL(ref.preview)); refs = []; renderRefs(); }
     if (action === "clear-results") { jobs = []; renderJobs(); }
+    if (action === "apply-preset") applyPreset();
+    if (action === "save-preset") savePreset();
+    if (action === "delete-preset") deletePreset();
   });
   filesNode.addEventListener("change", () => addFiles(filesNode.files));
   modelsNode.addEventListener("change", renderCapabilities);
