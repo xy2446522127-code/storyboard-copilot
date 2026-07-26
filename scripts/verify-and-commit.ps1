@@ -16,6 +16,7 @@ if (-not $env:TEMP -or -not (Test-Path $env:TEMP) -or ((Get-PSDrive -Name C).Fre
     New-Item -ItemType Directory -Force -Path $fallbackTemp | Out-Null
     $env:TEMP = $fallbackTemp
     $env:TMP = $fallbackTemp
+    $env:TMPDIR = $fallbackTemp
 }
 if (Test-Path 'F:\') {
     # npm writes diagnostic logs even for simple package-script invocations.
@@ -23,6 +24,17 @@ if (Test-Path 'F:\') {
     $npmCache = 'F:\Huahaihuabu\花海画布\build-cache\npm'
     New-Item -ItemType Directory -Force -Path $npmCache | Out-Null
     $env:NPM_CONFIG_CACHE = $npmCache
+}
+if (-not $env:GIT_DIR -and (Test-Path 'F:\') -and ((Get-PSDrive -Name C).Free -eq 0)) {
+    # The source checkout may live on C:, but a commit also needs object and ref
+    # locks, not just an index lock. Keep complete Git metadata on F: so verified
+    # commits and pushes never need to write to a full C: drive.
+    $alternateGitDir = 'F:\Huahaihuabu\花海画布\build-cache\git-metadata'
+    if (-not (Test-Path (Join-Path $alternateGitDir 'HEAD'))) {
+        Copy-Item -LiteralPath (Join-Path $repo '.git') -Destination $alternateGitDir -Recurse -Force
+    }
+    $env:GIT_DIR = $alternateGitDir
+    $env:GIT_WORK_TREE = $repo
 }
 Push-Location $repo
 try {

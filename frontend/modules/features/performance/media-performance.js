@@ -9,6 +9,9 @@ export function installMediaPerformance() {
   const activeVideos = new Map();
   let warned = false;
   let lastVideoLimitNotice = 0;
+  let mediaCount = 0;
+  let videoCount = 0;
+
   const onLargeCanvas = (event) => {
     const { count = 0, videos = 0 } = event.detail || {};
     toast(`当前画布有 ${count} 个媒体节点（含 ${videos} 个视频）。已启用懒加载与离屏暂停；建议关闭不需要的预览。`, "info");
@@ -21,6 +24,7 @@ export function installMediaPerformance() {
   };
   window.addEventListener("huahai:media-load", onLargeCanvas);
   window.addEventListener("huahai:media-limit", onVideoLimit);
+
   const pauseOldestVideo = () => {
     while (activeVideos.size > MAX_ACTIVE_VIDEOS) {
       const oldest = [...activeVideos.entries()].sort((left, right) => left[1] - right[1])[0]?.[0];
@@ -38,13 +42,15 @@ export function installMediaPerformance() {
         activeVideos.delete(media);
         media.pause();
       }
-      // Deliberately do not autoplay again: resuming a user-paused video is surprising.
+      // Do not autoplay when a video returns to view: this respects a user pause.
     }
   }, { rootMargin: "180px" });
 
   const prepare = (media) => {
     if (observed.has(media)) return;
     observed.add(media);
+    mediaCount += 1;
+    if (media instanceof HTMLVideoElement) videoCount += 1;
     media.classList.add("huahai-media-optimized");
     if (media instanceof HTMLImageElement) {
       media.loading = "lazy";
@@ -63,18 +69,45 @@ export function installMediaPerformance() {
       observer.observe(media);
     }
   };
-  const scan = () => {
-    const media = [...document.querySelectorAll(MEDIA_SELECTOR)];
-    media.forEach(prepare);
-    const videos = media.filter((item) => item instanceof HTMLVideoElement).length;
-    if (!warned && (media.length >= LARGE_CANVAS_WARNING || videos >= 50)) {
-      warned = true;
-      window.dispatchEvent(new CustomEvent("huahai:media-load", { detail: { count: media.length, videos, recommendation: "媒体较多：仅可见图片会延迟解码，最多同时播放 4 个视频。" } }));
-    }
+  const reportLargeCanvas = () => {
+    if (warned || (mediaCount < LARGE_CANVAS_WARNING && videoCount < 50)) return;
+    warned = true;
+    window.dispatchEvent(new CustomEvent("huahai:media-load", {
+      detail: { count: mediaCount, videos: videoCount, recommendation: "媒体较多：仅可见图片会延迟解码，最多同时播放 4 个视频。" },
+    }));
   };
+  const scan = (media = document.querySelectorAll(MEDIA_SELECTOR)) => {
+    media.forEach(prepare);
+    reportLargeCanvas();
+  };
+  const mediaInAddedNodes = (nodes) => {
+    const media = [];
+    nodes.forEach((node) => {
+      if (!(node instanceof Element)) return;
+      if (node.matches(MEDIA_SELECTOR)) media.push(node);
+      media.push(...node.querySelectorAll(MEDIA_SELECTOR));
+    });
+    return media;
+  };
+
+  // The first pass sees the already-mounted legacy canvas.  Afterwards, inspect
+  // only newly inserted media; a legacy React state update must not rescan 500+
+  // thumbnails on every animation frame.
   let frame = 0;
-  const schedule = () => { if (!frame) frame = requestAnimationFrame(() => { frame = 0; scan(); }); };
-  const mutationObserver = new MutationObserver(schedule);
+  let pendingMedia = new Set();
+  const schedule = (nodes) => {
+    mediaInAddedNodes(nodes).forEach((media) => pendingMedia.add(media));
+    if (frame) return;
+    frame = requestAnimationFrame(() => {
+      frame = 0;
+      const additions = pendingMedia;
+      pendingMedia = new Set();
+      if (additions.size) scan(additions);
+    });
+  };
+  const mutationObserver = new MutationObserver((records) => {
+    schedule(records.flatMap((record) => [...record.addedNodes]));
+  });
   mutationObserver.observe(document.getElementById("root") || document.body, { childList: true, subtree: true });
   window.addEventListener("pagehide", () => {
     activeVideos.clear();
