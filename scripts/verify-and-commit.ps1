@@ -57,7 +57,7 @@ try {
 
     # Only source, docs and scripts are eligible. Generated artifacts, local databases,
     # user media and settings never enter the index through this helper.
-    git add -- frontend src-tauri scripts docs README.md CHANGELOG.md LICENSE package.json announcements.json .gitignore
+    git add -- frontend src-tauri scripts tools docs README.md CHANGELOG.md LICENSE package.json announcements.json .gitignore
     $staged = @(git diff --cached --name-only)
     if ($staged.Count -eq 0) { Write-Host 'Nothing to commit.'; exit 0 }
     $secretPattern = '(?i)(sk-[a-z0-9_-]{20,}|api[_-]?key\s*[:=]\s*["''][^"'']{8,}|authorization\s*[:=]\s*["''][^"'']{8,})'

@@ -40,6 +40,44 @@ DEFAULT_CDP_PORT = 19222
 POLL_INTERVAL = 3
 MAX_POLL_ATTEMPTS = 300  # 15 minutes max
 
+# This helper is launched by the desktop application, but Python, pip and
+# Playwright otherwise choose the Windows profile on C:.  Keep every mutable
+# helper directory under the same F: data root as the application.
+DEFAULT_HUAHAI_ROOT = Path(r"F:\Huahaihuabu\花海画布-data\jimeng-runtime")
+
+def huahai_root() -> Path:
+    configured = os.environ.get("HUAHAI_JIMENG_ROOT", "").strip()
+    root = Path(configured) if configured else DEFAULT_HUAHAI_ROOT
+    if os.name == "nt" and not str(root).lower().startswith("f:\\"):
+        root = DEFAULT_HUAHAI_ROOT
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+def huahai_dir(name: str) -> Path:
+    directory = huahai_root() / name
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+def configure_local_runtime():
+    root = huahai_root()
+    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(huahai_dir("playwright-browsers")))
+    os.environ.setdefault("PIP_CACHE_DIR", str(huahai_dir("pip-cache")))
+    os.environ.setdefault("PYTHONPYCACHEPREFIX", str(huahai_dir("pycache")))
+    packages = huahai_dir("python-packages")
+    if str(packages) not in sys.path:
+        sys.path.insert(0, str(packages))
+    return packages
+
+PYTHON_PACKAGES = configure_local_runtime()
+
+def install_playwright_to_f_drive():
+    subprocess.check_call([
+        sys.executable, "-m", "pip", "install", "--target", str(PYTHON_PACKAGES),
+        "--no-warn-script-location", "playwright", "--quiet"
+    ], env=os.environ.copy())
+    if str(PYTHON_PACKAGES) not in sys.path:
+        sys.path.insert(0, str(PYTHON_PACKAGES))
+
 # ── JSON Protocol Helper ──────────────────────────────────────────────────
 
 def emit(event: str, data: dict = None):
@@ -125,8 +163,7 @@ def cmd_open_login_browser(params: dict):
         return
 
     # User data dir for persistent login
-    app_data = os.path.expandvars(r"%AppData%\StoryboardCopilot\jimeng_browser")
-    os.makedirs(app_data, exist_ok=True)
+    app_data = str(huahai_dir("browser-profile"))
 
     cmd = [
         browser_exe,
@@ -165,7 +202,7 @@ async def _ensure_playwright():
         return async_playwright
     except ImportError:
         emit_progress("install", 0, "正在安装Playwright...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright", "--quiet"])
+        install_playwright_to_f_drive()
         from playwright.async_api import async_playwright
         return async_playwright
 
@@ -182,7 +219,7 @@ async def _generate_via_playwright(params: dict):
     first_frame_path = params.get("first_frame_path")
     last_frame_path = params.get("last_frame_path")
     ref_image_paths = params.get("ref_image_paths", [])
-    output_dir = params.get("output_dir", os.path.expandvars(r"%AppData%\StoryboardCopilot\jimeng_output"))
+    output_dir = params.get("output_dir", str(huahai_dir("output")))
     timeout = params.get("timeout", 900)
 
     os.makedirs(output_dir, exist_ok=True)
@@ -210,12 +247,9 @@ async def _generate_via_playwright(params: dict):
                 elif "chrome" in browser_exe.lower() or "google chrome" in browser_exe.lower():
                     launch_kwargs["channel"] = "chrome"
                 # Set user data dir for persistent login
-                if sys.platform == "darwin":
-                    app_data = os.path.expanduser("~/Library/Application Support/StoryboardCopilot/jimeng_browser")
-                else:
-                    app_data = os.path.expandvars(r"%AppData%\StoryboardCopilot\jimeng_browser")
-                os.makedirs(app_data, exist_ok=True)
-                launch_kwargs["user_data_dir"] = app_data
+                # Persistent profiles are created by the explicit login command
+                # above. `BrowserType.launch` does not accept user_data_dir;
+                # passing it made the fallback path fail before a page opened.
                 launch_kwargs["args"] = ["--no-first-run", "--disable-popup-blocking"]
 
             try:
@@ -1053,7 +1087,7 @@ def cmd_generate_http(params: dict):
     first_frame_path = params.get("first_frame_path")
     last_frame_path = params.get("last_frame_path")
     ref_image_paths = params.get("ref_image_paths", [])
-    output_dir = params.get("output_dir", os.path.expandvars(r"%AppData%\StoryboardCopilot\jimeng_output"))
+    output_dir = params.get("output_dir", str(huahai_dir("output")))
     timeout = params.get("timeout", 900)
     max_retries = params.get("max_retries", 3)
 
@@ -1290,7 +1324,7 @@ def cmd_install_playwright(params: dict):
     """Install playwright. No need to download Chromium - we use system Edge/Chrome."""
     try:
         emit_progress("install", 5, "正在安装Playwright...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright", "--quiet"])
+        install_playwright_to_f_drive()
 
         emit_progress("install", 100, "Playwright安装完成（将使用系统Edge/Chrome浏览器）")
         emit("install_complete", {"success": True})
