@@ -499,7 +499,9 @@ async fn service_json_request(
         .await
         .map_err(|error| format!("{action} 响应读取失败: {error}"))?;
     if !status.is_success() {
-        return Err(format!("{action} 失败 ({status}): {body}"));
+        // A proxy can echo request data in an error body.  Never forward it to
+        // the UI, logs or a persisted job record.
+        return Err(format!("{action} 失败 ({status})"));
     }
     serde_json::from_str(&body).map_err(|error| format!("{action} 响应不是 JSON: {error}"))
 }
@@ -2975,10 +2977,7 @@ async fn send_chat_message(
         .await
         .map_err(|error| format!("chat response read failed: {error}"))?;
     if !status.is_success() {
-        return Err(format!(
-            "chat request failed ({status}): {}",
-            body.chars().take(500).collect::<String>()
-        ));
+        return Err(format!("chat request failed ({status})"));
     }
     let value: serde_json::Value = serde_json::from_str(&body)
         .map_err(|error| format!("chat response was not JSON: {error}"))?;
@@ -3147,7 +3146,7 @@ fn start_chat_stream(
         };
         let status = response.status();
         if !status.is_success() {
-            let body = tokio::select! {
+            let _ = tokio::select! {
                 _ = cancel.cancelled() => {
                     finish_chat_stream(worker_app.state::<ChatStreamState>().inner(), &worker_request_id, "cancelled", None);
                     return;
@@ -3158,10 +3157,7 @@ fn start_chat_stream(
                 worker_app.state::<ChatStreamState>().inner(),
                 &worker_request_id,
                 "failed",
-                Some(format!(
-                    "chat request failed ({status}): {}",
-                    body.chars().take(500).collect::<String>()
-                )),
+                Some(format!("chat request failed ({status})")),
             );
             return;
         }
@@ -4651,7 +4647,7 @@ async fn list_remote_models(base_url: String, api_key: String) -> Result<Vec<Str
         .await
         .map_err(|error| format!("读取模型响应失败: {error}"))?;
     if !status.is_success() {
-        return Err(format!("获取模型失败 ({status}): {body}"));
+        return Err(format!("获取模型失败 ({status})"));
     }
     let models = strings_from_models(
         &serde_json::from_str(&body).map_err(|error| format!("模型响应不是 JSON: {error}"))?,
@@ -5035,7 +5031,7 @@ async fn submit_generate_image_job(
                 .map_err(|error| format!("读取图片生成响应失败: {error}"))?;
             if !status.is_success() {
                 job.status = "failed".to_string();
-                job.error = Some(format!("图片生成请求失败 ({status}): {body}"));
+                job.error = Some(format!("图片生成请求失败 ({status})"));
             } else {
                 let value: serde_json::Value = serde_json::from_str(&body)
                     .map_err(|error| format!("图片生成响应不是 JSON: {error}"))?;
@@ -5424,13 +5420,14 @@ async fn generate_image(
         .await
         .map_err(|error| format!("图片生成请求失败: {error}"))?;
     let status = response.status();
+    if !status.is_success() {
+        let _ = response.bytes().await;
+        return Err(format!("图片生成失败 ({status})"));
+    }
     let value: serde_json::Value = response
         .json()
         .await
         .map_err(|error| format!("图片生成响应不是 JSON: {error}"))?;
-    if !status.is_success() {
-        return Err(format!("图片生成失败 ({status}): {value}"));
-    }
     image_result_from_response(&value).ok_or("图片生成响应未包含结果".to_string())
 }
 
@@ -5455,10 +5452,8 @@ async fn generate_tts(app: AppHandle, payload: String) -> Result<String, String>
         .map_err(|error| format!("TTS 请求失败: {error}"))?;
     let status = response.status();
     if !status.is_success() {
-        return Err(format!(
-            "TTS 请求失败 ({status}): {}",
-            response.text().await.unwrap_or_default()
-        ));
+        let _ = response.bytes().await;
+        return Err(format!("TTS 请求失败 ({status})"));
     }
     let bytes = response
         .bytes()
@@ -5523,23 +5518,30 @@ async fn submit_generate_video_job(
     match response {
         Ok(response) => {
             let status = response.status();
+            if !status.is_success() {
+                let _ = response.bytes().await;
+                job.status = "failed".to_string();
+                job.error = Some(format!("视频生成失败 ({status})"));
+                job.updated_at = Utc::now().to_rfc3339();
+                let _guard = lock
+                    .0
+                    .lock()
+                    .map_err(|_| "generation job lock poisoned".to_string())?;
+                save_generation_job(&open_projects(&app)?, &job)?;
+                return Err(job.error.unwrap_or_else(|| "视频生成失败".to_string()));
+            }
             let value: serde_json::Value = response
                 .json()
                 .await
                 .map_err(|error| format!("视频生成响应不是 JSON: {error}"))?;
-            if !status.is_success() {
-                job.status = "failed".to_string();
-                job.error = Some(format!("视频生成失败 ({status}): {value}"));
+            job.result = image_result_from_response(&value);
+            job.remote_job_id = remote_job_id_from_response(&value);
+            job.status = if job.result.is_some() {
+                "succeeded".to_string()
             } else {
-                job.result = image_result_from_response(&value);
-                job.remote_job_id = remote_job_id_from_response(&value);
-                job.status = if job.result.is_some() {
-                    "succeeded".to_string()
-                } else {
-                    response_status(&value, "pending")
-                };
-                job.progress = if job.status == "succeeded" { 100 } else { 0 };
-            }
+                response_status(&value, "pending")
+            };
+            job.progress = if job.status == "succeeded" { 100 } else { 0 };
         }
         Err(error) => {
             job.status = "failed".to_string();
