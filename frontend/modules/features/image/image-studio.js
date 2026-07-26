@@ -23,6 +23,10 @@ function readFile(file) {
   });
 }
 
+function isImageFile(file) {
+  return Boolean(file?.type?.startsWith("image/")) || /\.(?:avif|bmp|gif|jpe?g|png|webp)$/i.test(file?.name || "");
+}
+
 function dimensionsForRatio(value, resolution = "1k") {
   const scale = ({ "1k": 1, "2k": 1.5, "4k": 2 })[resolution] || 1;
   const base = ({ "1:1": [1024, 1024], "2:3": [1024, 1536], "3:2": [1536, 1024], "3:4": [1024, 1365], "4:3": [1365, 1024], "9:16": [1024, 1792], "16:9": [1792, 1024] })[value] || [1024, 1024];
@@ -73,6 +77,12 @@ export function installImageStudio({ openApiSettings } = {}) {
       seed: Number.isFinite(Number(metadata.seed)) ? Number(metadata.seed) : undefined,
       reference_images: [],
     };
+  };
+  const resultsFromMetadata = (metadata, fallback) => {
+    const saved = Array.isArray(metadata?.results)
+      ? metadata.results.filter((value) => typeof value === "string" && value.trim() && !value.startsWith("data:"))
+      : [];
+    return saved.length ? saved.slice(0, 4) : (fallback ? [fallback] : []);
   };
   const restoreJobParameters = (job) => {
     const metadata = job.metadata;
@@ -174,6 +184,18 @@ export function installImageStudio({ openApiSettings } = {}) {
         const asset = document.createElement("button"); asset.type = "button"; asset.textContent = "加入素材库"; asset.addEventListener("click", () => saveToAssets(job));
         const canvas = document.createElement("button"); canvas.type = "button"; canvas.textContent = "加入项目画布"; canvas.addEventListener("click", () => addToCanvas(job));
         actions.append(asset, canvas); card.append(actions);
+        // Older jobs expose only `result`; newer studio jobs keep every saved
+        // F-drive result in request metadata.  Render the remaining images as
+        // independent assets so each can be placed on the canvas.
+        for (const [index, result] of (job.results || []).slice(1).entries()) {
+          const extra = document.createElement("div"); extra.className = "huahai-image__extra-result";
+          const extraImage = document.createElement("img"); extraImage.src = result; extraImage.alt = `生成结果 ${index + 2}`; extraImage.addEventListener("click", () => window.open(result, "_blank"));
+          const extraActions = document.createElement("div"); extraActions.className = "huahai-image__job-actions";
+          const extraJob = { ...job, result };
+          const extraAsset = document.createElement("button"); extraAsset.type = "button"; extraAsset.textContent = "加入素材库"; extraAsset.addEventListener("click", () => saveToAssets(extraJob));
+          const extraCanvas = document.createElement("button"); extraCanvas.type = "button"; extraCanvas.textContent = "加入项目画布"; extraCanvas.addEventListener("click", () => addToCanvas(extraJob));
+          extraActions.append(extraAsset, extraCanvas); extra.append(extraImage, extraActions); card.append(extra);
+        }
       } else if (job.status === "failed" && job.payload) {
         const actions = document.createElement("div"); actions.className = "huahai-image__job-actions";
         const retry = document.createElement("button"); retry.type = "button"; retry.textContent = "重试生成"; retry.addEventListener("click", () => retryJob(job));
@@ -217,7 +239,10 @@ export function installImageStudio({ openApiSettings } = {}) {
   const poll = async (job) => {
     try {
       const latest = await invoke("get_generate_image_job", { jobId: job.id });
-      job.status = latest.status; job.progress = latest.progress; job.result = latest.result; job.error = latest.error; renderJobs();
+      job.status = latest.status; job.progress = latest.progress; job.result = latest.result; job.error = latest.error;
+      try { job.metadata = JSON.parse(latest.requestJson || "{}"); } catch { job.metadata = null; }
+      job.results = resultsFromMetadata(job.metadata, job.result);
+      renderJobs();
       if (latest.status === "pending") window.setTimeout(() => poll(job), 2200);
     } catch (error) { job.status = "failed"; job.error = String(error); renderJobs(); }
   };
@@ -259,6 +284,7 @@ export function installImageStudio({ openApiSettings } = {}) {
         prompt: metadata?.prompt || "已保存的生成任务",
         modelLabel: metadata?.model || job.providerId,
         result: job.result || "",
+        results: resultsFromMetadata(metadata, job.result || ""),
         error: job.error || "",
         metadata,
         payload: retryPayloadFromMetadata(metadata),
@@ -296,9 +322,11 @@ export function installImageStudio({ openApiSettings } = {}) {
   const addFiles = async (files) => {
     for (const file of [...files]) {
       if (refs.length >= 4) break;
-      if (!file.type.startsWith("image/")) { toast(`${file.name} 不是图片。`, "error"); continue; }
+      if (!isImageFile(file)) { toast(`${file.name} 不是图片。`, "error"); continue; }
       if (file.size > maxReferenceBytes) { toast(`${file.name} 超过 10 MB。`, "error"); continue; }
-      refs.push({ preview: URL.createObjectURL(file), dataUrl: await readFile(file), name: file.name });
+      try {
+        refs.push({ preview: URL.createObjectURL(file), dataUrl: await readFile(file), name: file.name });
+      } catch (error) { toast(`${file.name} 读取失败：${String(error)}`, "error"); }
     }
     renderRefs();
   };
@@ -320,7 +348,11 @@ export function installImageStudio({ openApiSettings } = {}) {
     if (action === "save-preset") savePreset();
     if (action === "delete-preset") deletePreset();
   });
-  filesNode.addEventListener("change", () => addFiles(filesNode.files));
+  filesNode.addEventListener("change", async () => {
+    await addFiles(filesNode.files);
+    // Clearing lets a user remove a reference then choose the same file again.
+    filesNode.value = "";
+  });
   modelsNode.addEventListener("change", renderCapabilities);
   field("resolution").addEventListener("change", renderCapabilities);
   form.addEventListener("dragover", (event) => { if ([...event.dataTransfer?.items || []].some((item) => item.kind === "file")) event.preventDefault(); });

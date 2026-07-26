@@ -142,6 +142,45 @@ mod tests {
     }
 
     #[test]
+    fn image_studio_preserves_all_response_results_without_inline_media() {
+        let response = serde_json::json!({"data":[
+            {"url":"https://example.test/one.png"},
+            {"url":"https://example.test/two.png"}
+        ]});
+        assert_eq!(
+            image_results_from_response(&response),
+            vec![
+                "https://example.test/one.png".to_string(),
+                "https://example.test/two.png".to_string()
+            ]
+        );
+        let mut job = GenerationJob {
+            job_id: "job-multi".to_string(),
+            provider_id: "provider".to_string(),
+            kind: "image".to_string(),
+            status: "pending".to_string(),
+            progress: 0,
+            result: None,
+            error: None,
+            remote_job_id: None,
+            request_json: image_job_request_metadata(&serde_json::json!({
+                "provider_id":"provider", "model":"model", "prompt":"flowers"
+            })),
+            updated_at: "".to_string(),
+        };
+        record_image_job_results(&mut job, image_results_from_response(&response));
+        assert_eq!(job.result.as_deref(), Some("https://example.test/one.png"));
+        assert_eq!(
+            image_job_results_from_metadata(&job.request_json),
+            vec![
+                "https://example.test/one.png".to_string(),
+                "https://example.test/two.png".to_string()
+            ]
+        );
+        assert!(!job.request_json.contains("data:image"));
+    }
+
+    #[test]
     fn image_job_metadata_keeps_retry_fields_without_media_payloads() {
         let metadata = image_job_request_metadata(&serde_json::json!({
             "provider_id": "provider-a",
@@ -465,12 +504,7 @@ async fn service_json_request(
     serde_json::from_str(&body).map_err(|error| format!("{action} 响应不是 JSON: {error}"))
 }
 
-fn image_result_from_response(value: &serde_json::Value) -> Option<String> {
-    let item = value
-        .get("data")
-        .and_then(serde_json::Value::as_array)
-        .and_then(|items| items.first())
-        .unwrap_or(value);
+fn image_result_from_item(item: &serde_json::Value) -> Option<String> {
     for key in ["url", "result", "output", "result_url", "video_url"] {
         if let Some(result) = item.get(key).and_then(serde_json::Value::as_str) {
             return Some(result.to_string());
@@ -479,6 +513,25 @@ fn image_result_from_response(value: &serde_json::Value) -> Option<String> {
     item.get("b64_json")
         .and_then(serde_json::Value::as_str)
         .map(|encoded| format!("data:image/png;base64,{encoded}"))
+}
+
+/// OpenAI-compatible image APIs return one item for every requested image in
+/// `data`.  Keep the legacy single-result helper for old nodes, but retain the
+/// full set for the studio so choosing 2–4 images never silently discards work.
+fn image_results_from_response(value: &serde_json::Value) -> Vec<String> {
+    let items = value
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_else(|| std::slice::from_ref(value));
+    items
+        .iter()
+        .filter_map(image_result_from_item)
+        .collect()
+}
+
+fn image_result_from_response(value: &serde_json::Value) -> Option<String> {
+    image_results_from_response(value).into_iter().next()
 }
 
 fn remote_model_count(value: &serde_json::Value) -> usize {
@@ -677,6 +730,51 @@ fn persistent_data_dir(name: &str) -> std::io::Result<PathBuf> {
     }
     fs::create_dir_all(&target)?;
     Ok(target)
+}
+
+fn persist_generated_image_results(
+    app: &AppHandle,
+    sources: Vec<String>,
+) -> Result<Vec<String>, String> {
+    sources
+        .into_iter()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| persist_media_source(app, "generated-images", value))
+        .collect()
+}
+
+fn image_job_results_from_metadata(metadata: &str) -> Vec<String> {
+    serde_json::from_str::<serde_json::Value>(metadata)
+        .ok()
+        .and_then(|value| value.get("results").and_then(serde_json::Value::as_array).cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|value| value.as_str().map(ToOwned::to_owned))
+        .filter(|value| !value.trim().is_empty() && !value.starts_with("data:"))
+        .take(4)
+        .collect()
+}
+
+fn record_image_job_results(job: &mut GenerationJob, results: Vec<String>) {
+    let mut all_results = image_job_results_from_metadata(&job.request_json);
+    for result in results {
+        if !all_results.iter().any(|saved| saved == &result) {
+            all_results.push(result);
+        }
+    }
+    all_results.truncate(4);
+    if let Some(first) = all_results.first() {
+        job.result = Some(first.clone());
+    }
+    let mut metadata = serde_json::from_str::<serde_json::Value>(&job.request_json)
+        .unwrap_or_else(|_| serde_json::json!({}));
+    if !metadata.is_object() {
+        metadata = serde_json::json!({});
+    }
+    metadata["results"] = serde_json::Value::Array(
+        all_results.into_iter().map(serde_json::Value::String).collect(),
+    );
+    job.request_json = metadata.to_string();
 }
 
 fn app_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -5035,9 +5133,9 @@ async fn run_background_image_job(
                     Ok(_value) if cancel.is_cancelled() => cancel_background_image_job_record(&mut job),
                     Ok(value) => {
                         job.remote_job_id = remote_job_id_from_response(&value);
-                        match persist_generated_image_result(&app, image_result_from_response(&value)) {
-                            Ok(result) => {
-                                job.result = result;
+                        match persist_generated_image_results(&app, image_results_from_response(&value)) {
+                            Ok(results) => {
+                                record_image_job_results(&mut job, results);
                                 job.status = if job.result.is_some() {
                                     "succeeded".to_string()
                                 } else {
@@ -5246,9 +5344,9 @@ async fn get_generate_image_job(
                 .json()
                 .await
                 .map_err(|error| format!("生成任务响应不是 JSON: {error}"))?;
-            match persist_generated_image_result(&app, image_result_from_response(&value)) {
-                Ok(remote_result) => {
-                    job.result = remote_result.or(job.result);
+            match persist_generated_image_results(&app, image_results_from_response(&value)) {
+                Ok(results) => {
+                    record_image_job_results(&mut job, results);
                     job.status = if job.result.is_some() {
                         "succeeded".to_string()
                     } else {
