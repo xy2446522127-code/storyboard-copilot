@@ -4653,13 +4653,37 @@ fn apply_canvas_batch_action(
                         .find(|node| node_is_kind(node, "video"))
                         .and_then(|node| node.get("type"))
                         .cloned()
-                        .unwrap_or_else(|| serde_json::json!("video"));
+                        // A project containing only images has no existing video
+                        // node from which to infer the type. The recovered core
+                        // registers `videoNode`, not a generic `video` node; using
+                        // the latter made an automatically created target render as
+                        // an unknown card instead of a usable generation node.
+                        .unwrap_or_else(|| serde_json::json!("videoNode"));
                     let created_id = format!("video-{}", Uuid::new_v4());
                     nodes.push(serde_json::json!({
                         "id": created_id,
                         "type": video_type,
                         "position": {"x": max_x + 48.0, "y": if top_y.is_finite() { top_y } else { 0.0 }},
-                        "data": {"label": "批量图生视频", "displayName": "批量图生视频", "videoMode": "image2video", "referenceImageNodeIds": image_ids}
+                        "data": {
+                            "label": "批量图生视频",
+                            "displayName": "批量图生视频",
+                            "imageUrl": null,
+                            "aspectRatio": "16:9",
+                            "isSizeManuallyAdjusted": false,
+                            "prompt": "",
+                            "model": "",
+                            "provider": "",
+                            "providerId": "",
+                            "size": "720P",
+                            "requestAspectRatio": "16:9",
+                            "extraParams": {},
+                            "isGenerating": false,
+                            "generationStartedAt": null,
+                            "generationDurationMs": null,
+                            "videoUrl": null,
+                            "videoMode": "image2video",
+                            "referenceImageNodeIds": image_ids
+                        }
                     }));
                     node_id(nodes.last().expect("new node exists"))
                         .expect("new node id exists")
