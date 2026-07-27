@@ -2,6 +2,14 @@
   "schemaVersion": 1,
   "announcements": [
     {
+      "id": "2026-07-27-5-9-23",
+      "title": "5.9.23 多参考图批量视频已发布",
+      "body": "批量连接图片到生视频节点后，支持多参考图的模型会收到全部参考图；不支持时会明确提示改用首图模式。",
+      "level": "success",
+      "publishedAt": "2026-07-27T12:35:43.355Z",
+      "url": "https://github.com/xy2446522127-code/storyboard-copilot/releases/tag/v5.9.23"
+    },
+    {
       "id": "2026-07-27-5-9-22",
       "title": "5.9.22 批量画布修复已发布",
       "body": "已修复旧画布中已保存项目被错误提示“未保存”而无法批量连线或排列的问题。",
