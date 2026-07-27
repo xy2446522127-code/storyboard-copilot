@@ -18,6 +18,8 @@
 #huahai-canvas-batch-tools button { padding: 8px 11px; border: 1px solid var(--hh-border); border-radius: 8px; color: var(--hh-text); background: var(--hh-surface-raised); cursor: pointer; white-space: nowrap; }
 #huahai-canvas-batch-tools button[data-batch-action="connect-video"] { border-color: #6584de; background: #334f9f; }
 #huahai-canvas-batch-tools button:hover { background: #405064; }
+#huahai-canvas-batch-tools button:disabled { cursor: not-allowed; opacity: .46; }
+#huahai-canvas-batch-tools button:focus-visible { outline: 2px solid #8eb4ff; outline-offset: 2px; }
 
 @media (max-width: 700px) {
   #huahai-canvas-batch-tools { max-width: calc(100vw - 24px); flex-wrap: wrap; justify-content: center; }

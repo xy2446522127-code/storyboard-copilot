@@ -25,4 +25,4 @@
 
 ## 许可证
 
-[MIT](LICENSE)
+[MIT](LICENSE)。第三方交互参考与署名见 [NOTICE.md](NOTICE.md)。

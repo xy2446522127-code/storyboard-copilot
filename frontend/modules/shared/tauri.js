@@ -25,8 +25,40 @@ export function safeText(value, fallback = "") {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
 }
 
+// The recovered application has been built with more than one React Flow
+// version. Some versions mark a selection with `.selected`, while others use
+// `aria-selected` or `data-selected`. Keep this list here rather than making
+// every canvas plug-in guess a single DOM shape.
+export const flowNodeSelector = [
+  ".react-flow__node",
+  ".xyflow__node",
+].join(", ");
+
+const selectedFlowNodeSelector = [
+  ".react-flow__node.selected",
+  ".xyflow__node.selected",
+  ".react-flow__node[aria-selected=\"true\"]",
+  ".xyflow__node[aria-selected=\"true\"]",
+  ".react-flow__node[data-selected=\"true\"]",
+  ".xyflow__node[data-selected=\"true\"]",
+].join(", ");
+
+function flowNodeId(node) {
+  return node.dataset.id
+    || node.getAttribute("data-id")
+    || node.id?.replace(/^(?:reactflow|react-flow|xyflow)__node-/, "")
+    || null;
+}
+
+export function selectedFlowNodes() {
+  const unique = new Map();
+  document.querySelectorAll(selectedFlowNodeSelector).forEach((node) => {
+    const id = flowNodeId(node);
+    if (id) unique.set(id, node);
+  });
+  return [...unique.entries()].map(([id, element]) => ({ id, element }));
+}
+
 export function selectedFlowNodeIds() {
-  return [...document.querySelectorAll(".react-flow__node.selected, .xyflow__node.selected")]
-    .map((node) => node.dataset.id || node.getAttribute("data-id") || node.id?.replace(/^reactflow__node-/, ""))
-    .filter(Boolean);
+  return selectedFlowNodes().map(({ id }) => id);
 }

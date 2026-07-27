@@ -1,4 +1,4 @@
-import { invoke, selectedFlowNodeIds, toast } from "../../shared/tauri.js";
+import { flowNodeSelector, invoke, selectedFlowNodeIds, selectedFlowNodes, toast } from "../../shared/tauri.js";
 
 const LEGACY_SAVE_TIMEOUT_MS = 4_000;
 const LEGACY_SAVE_POLL_MS = 120;
@@ -20,6 +20,7 @@ export function installCanvasBatchTools() {
     <button type="button" data-batch-action="cancel">取消选择</button>`;
   document.body.append(toolbar);
   let selected = [];
+  let selectedNodeMetadata = [];
   let refreshTimer;
   let selectionRevision = 0;
 
@@ -28,15 +29,44 @@ export function installCanvasBatchTools() {
       .forEach((button) => { button.disabled = !enabled; });
   };
 
+  const isGroupNode = (node) => {
+    const className = String(node.className || "").toLowerCase();
+    return className.includes("groupnode") || node.dataset?.nodeType === "groupNode";
+  };
+
+  const placeToolbarNearSelection = () => {
+    if (!selectedNodeMetadata.length) {
+      toolbar.style.removeProperty("left");
+      toolbar.style.removeProperty("top");
+      toolbar.style.removeProperty("bottom");
+      toolbar.style.removeProperty("transform");
+      return;
+    }
+    const boxes = selectedNodeMetadata.map(({ element }) => element.getBoundingClientRect())
+      .filter((box) => box.width > 0 && box.height > 0);
+    if (!boxes.length) return;
+    const left = Math.min(...boxes.map((box) => box.left));
+    const right = Math.max(...boxes.map((box) => box.right));
+    const top = Math.min(...boxes.map((box) => box.top));
+    const toolbarWidth = Math.min(toolbar.offsetWidth || 520, window.innerWidth - 24);
+    const x = Math.max(12, Math.min(window.innerWidth - toolbarWidth - 12, (left + right) / 2 - toolbarWidth / 2));
+    const y = Math.max(12, top - (toolbar.offsetHeight || 44) - 10);
+    toolbar.style.left = `${x}px`;
+    toolbar.style.top = `${y}px`;
+    toolbar.style.bottom = "auto";
+    toolbar.style.transform = "none";
+  };
+
   // The recovered node renderer can defer an image preview or use a CSS
   // background. Testing for a selected `<img>` therefore hides valid image
   // nodes. Ask the same persisted canvas classifier that executes the action.
   const refresh = async () => {
-    selected = selectedFlowNodeIds();
+    selectedNodeMetadata = selectedFlowNodes();
+    selected = selectedNodeMetadata.map(({ id }) => id);
     const revision = ++selectionRevision;
-    const selectedNodes = [...document.querySelectorAll(".react-flow__node.selected, .xyflow__node.selected")];
-    const hasGroup = selectedNodes.some((node) => (node.innerText || "").includes("分组"));
+    const hasGroup = selectedNodeMetadata.some(({ element }) => isGroupNode(element));
     toolbar.classList.toggle("is-visible", hasGroup || selected.length >= 2);
+    if (hasGroup || selected.length >= 2) requestAnimationFrame(placeToolbarNearSelection);
     setImageActionAvailability(false);
     toolbar.querySelector('[data-batch-action="group"]').disabled = selected.length < 2;
     toolbar.querySelector('[data-batch-action="ungroup"]').disabled = !hasGroup;
@@ -88,15 +118,19 @@ export function installCanvasBatchTools() {
   };
   document.addEventListener("pointerup", delayedRefresh, true);
   document.addEventListener("keyup", delayedRefresh, true);
-  const nodeSelector = ".react-flow__node, .xyflow__node";
   const selectionObserver = new MutationObserver((mutations) => {
     const selectionChanged = mutations.some((mutation) => {
-      if (mutation.type === "attributes") return mutation.target instanceof Element && mutation.target.matches(nodeSelector);
-      return [...mutation.addedNodes, ...mutation.removedNodes].some((node) => node instanceof Element && (node.matches(nodeSelector) || node.querySelector?.(nodeSelector)));
+      if (mutation.type === "attributes") return mutation.target instanceof Element && mutation.target.matches(flowNodeSelector);
+      return [...mutation.addedNodes, ...mutation.removedNodes].some((node) => node instanceof Element && (node.matches(flowNodeSelector) || node.querySelector?.(flowNodeSelector)));
     });
     if (selectionChanged) delayedRefresh();
   });
-  selectionObserver.observe(document.getElementById("root"), { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
+  selectionObserver.observe(document.getElementById("root"), {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ["class", "aria-selected", "data-selected"],
+  });
   window.addEventListener("pagehide", () => selectionObserver.disconnect(), { once: true });
 
   toolbar.addEventListener("click", async (event) => {
