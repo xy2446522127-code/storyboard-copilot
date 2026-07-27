@@ -116,6 +116,17 @@ mod tests {
     }
 
     #[test]
+    fn automatic_batch_video_node_uses_the_legacy_core_shape() {
+        let node = legacy_batch_video_node("video-new".to_string(), 960.0, 120.0, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(node.get("type").and_then(serde_json::Value::as_str), Some("videoNode"));
+        let data = node.get("data").expect("video node data");
+        assert_eq!(data.get("videoMode").and_then(serde_json::Value::as_str), Some("image2video"));
+        assert_eq!(data.get("referenceImageNodeIds").and_then(serde_json::Value::as_array).map(Vec::len), Some(2));
+        assert!(data.get("prompt").is_some());
+        assert!(data.get("videoUrl").is_some());
+    }
+
+    #[test]
     fn raw_media_is_not_allowed_in_default_chat_context() {
         assert!(sanitize_chat_context(Some(
             r#"{"selectedNodes":[{"id":"1","text":"hello"}]}"#.to_string()
@@ -3375,6 +3386,42 @@ fn node_size(node: &serde_json::Value) -> (f64, f64) {
     )
 }
 
+/// Creates the exact legacy node shape expected by the recovered React canvas.
+/// Keeping it in one function prevents a future batch feature from accidentally
+/// creating a generic `video` node that the old renderer does not understand.
+fn legacy_batch_video_node(
+    id: String,
+    x: f64,
+    y: f64,
+    reference_image_node_ids: Vec<String>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "type": "videoNode",
+        "position": {"x": x, "y": y},
+        "data": {
+            "label": "批量图生视频",
+            "displayName": "批量图生视频",
+            "imageUrl": null,
+            "aspectRatio": "16:9",
+            "isSizeManuallyAdjusted": false,
+            "prompt": "",
+            "model": "",
+            "provider": "",
+            "providerId": "",
+            "size": "720P",
+            "requestAspectRatio": "16:9",
+            "extraParams": {},
+            "isGenerating": false,
+            "generationStartedAt": null,
+            "generationDurationMs": null,
+            "videoUrl": null,
+            "videoMode": "image2video",
+            "referenceImageNodeIds": reference_image_node_ids
+        }
+    })
+}
+
 fn write_project_canvas(
     connection: &Connection,
     project: &ProjectRecord,
@@ -4648,46 +4695,14 @@ fn apply_canvas_batch_action(
                         })
                         .map(|node| node_position(node).1)
                         .fold(f64::INFINITY, f64::min);
-                    let video_type = nodes
-                        .iter()
-                        .find(|node| node_is_kind(node, "video"))
-                        .and_then(|node| node.get("type"))
-                        .cloned()
-                        // A project containing only images has no existing video
-                        // node from which to infer the type. The recovered core
-                        // registers `videoNode`, not a generic `video` node; using
-                        // the latter made an automatically created target render as
-                        // an unknown card instead of a usable generation node.
-                        .unwrap_or_else(|| serde_json::json!("videoNode"));
                     let created_id = format!("video-{}", Uuid::new_v4());
-                    nodes.push(serde_json::json!({
-                        "id": created_id,
-                        "type": video_type,
-                        "position": {"x": max_x + 48.0, "y": if top_y.is_finite() { top_y } else { 0.0 }},
-                        "data": {
-                            "label": "批量图生视频",
-                            "displayName": "批量图生视频",
-                            "imageUrl": null,
-                            "aspectRatio": "16:9",
-                            "isSizeManuallyAdjusted": false,
-                            "prompt": "",
-                            "model": "",
-                            "provider": "",
-                            "providerId": "",
-                            "size": "720P",
-                            "requestAspectRatio": "16:9",
-                            "extraParams": {},
-                            "isGenerating": false,
-                            "generationStartedAt": null,
-                            "generationDurationMs": null,
-                            "videoUrl": null,
-                            "videoMode": "image2video",
-                            "referenceImageNodeIds": image_ids
-                        }
-                    }));
-                    node_id(nodes.last().expect("new node exists"))
-                        .expect("new node id exists")
-                        .to_string()
+                    nodes.push(legacy_batch_video_node(
+                        created_id.clone(),
+                        max_x + 48.0,
+                        if top_y.is_finite() { top_y } else { 0.0 },
+                        image_ids.clone(),
+                    ));
+                    created_id
                 }
                 (None, 1) => selected_videos[0].clone(),
                 (None, _) => {
