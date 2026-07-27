@@ -70,6 +70,11 @@ const batchTools = readFileSync(resolve(root, "frontend/modules/features/canvas/
 if (!batchTools.includes("resolveProjectAfterLegacySave") || !batchTools.includes("LEGACY_SAVE_TIMEOUT_MS")) {
   throw new Error("Canvas batch tools must wait for the legacy save instead of using a fixed persistence delay.");
 }
+
+const legacyModelBridge = readFileSync(resolve(root, "frontend/modules/features/api/legacy-model-bridge.js"), "utf8");
+if (!legacyModelBridge.includes('querySelectorAll("textarea, input")') || !legacyModelBridge.includes("list_saved_provider_models")) {
+  throw new Error("Legacy custom API cards must support both input and textarea model fields with saved-key model fetching.");
+}
 if (batchTools.includes("await new Promise((resolve) => window.setTimeout(resolve, 650));")) {
   throw new Error("Canvas batch tools must not assume the legacy canvas has saved after 650 ms.");
 }

@@ -3,7 +3,10 @@ import { invoke, toast } from "../../shared/tauri.js";
 const MODEL_PLACEHOLDER = /模型名称|model\s*(名称|name)/i;
 
 function legacyModelFields() {
-  return [...document.querySelectorAll("textarea")]
+  // The recovered custom-provider card has existed in both one-line input and
+  // textarea variants. Limiting this bridge to textareas made the useful
+  // “拉取模型” control disappear on the common single-line legacy form.
+  return [...document.querySelectorAll("textarea, input")]
     .filter((field) => MODEL_PLACEHOLDER.test(field.placeholder || ""));
 }
 
