@@ -4963,6 +4963,13 @@ fn append_blank_canvas_file_references(
                 return Err("dropped file is invalid or too large".to_string());
             }
             let category = normalized_asset_category(&file.category)?;
+            // The browser plug-in classifies the visible drop first, but it is
+            // not a security boundary.  Preserve the same server-side file
+            // category guard used by the material library so a forged Tauri
+            // message cannot persist an arbitrary file as a canvas reference.
+            if !asset_file_name_matches_category(category, &file.file_name) {
+                return Err(format!("unsupported file format for {category}"));
+            }
             let path = persist_media_source(&app, category, file.source)?;
             let path_buf = PathBuf::from(&path);
             created_media.push(path_buf.clone());
