@@ -104,10 +104,14 @@ mod tests {
     fn canvas_node_classifier_uses_type_and_data() {
         let image =
             serde_json::json!({"id":"image-1","type":"image","data":{"imageUrl":"file.png"}});
+        let legacy_upload = serde_json::json!({"id":"upload-1","type":"uploadNode","data":{"previewImageUrl":"file.png"}});
         let video =
             serde_json::json!({"id":"video-1","type":"video","data":{"videoMode":"image2video"}});
+        let legacy_video = serde_json::json!({"id":"video-2","type":"videoNode","data":{"model":"video-model"}});
         assert!(node_is_kind(&image, "image"));
+        assert!(node_is_kind(&legacy_upload, "image"));
         assert!(node_is_kind(&video, "video"));
+        assert!(node_is_kind(&legacy_video, "video"));
         assert!(!node_is_kind(&image, "video"));
     }
 
