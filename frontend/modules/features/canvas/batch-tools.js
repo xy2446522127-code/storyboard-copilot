@@ -100,12 +100,22 @@ export function installCanvasBatchTools() {
     if (!nodeIds.length) return null;
     const before = await invoke("list_project_summaries");
     const beforeUpdatedAt = new Map(before.map((project) => [project.id, project.updatedAt]));
+    // A selection whose ids are already present in exactly one stored project
+    // is a safe identity anchor. Some versions of the recovered canvas skip a
+    // database write when its Save button is pressed while the graph is clean;
+    // relying only on `updatedAt` then made every batch action incorrectly say
+    // that the project had not been saved.
+    const knownProjectId = await invoke("find_project_for_canvas_selection", { nodeIds })
+      .catch(() => null);
     if (!saveLegacyCanvas()) return undefined;
     // The legacy canvas does not expose a save-complete event.  Do not assume a
     // fixed delay is enough: wait for the project containing this exact current
     // selection to receive a new persisted timestamp before changing its canvas
     // from the compatibility plug-in.
-    const deadline = Date.now() + LEGACY_SAVE_TIMEOUT_MS;
+    // Existing selections already identify their project. Give a normal save a
+    // short chance to persist recent moves, but do not impose a four-second
+    // false "unsaved" delay on an otherwise clean canvas.
+    const deadline = Date.now() + (knownProjectId ? 900 : LEGACY_SAVE_TIMEOUT_MS);
     while (Date.now() < deadline) {
       await new Promise((resolve) => window.setTimeout(resolve, LEGACY_SAVE_POLL_MS));
       const projectId = await invoke("find_project_for_canvas_selection", { nodeIds });
@@ -114,7 +124,11 @@ export function installCanvasBatchTools() {
       const project = projects.find((candidate) => candidate.id === projectId);
       if (project && beforeUpdatedAt.get(project.id) !== project.updatedAt) return projectId;
     }
-    return null;
+    // Do not guess the newest project. Only fall back to the exact project that
+    // already contained every selected node before the save request. This keeps
+    // clean, previously saved canvases usable while still refusing ambiguous or
+    // newly-created selections that were never persisted.
+    return knownProjectId || null;
   };
   document.addEventListener("pointerup", delayedRefresh, true);
   document.addEventListener("keyup", delayedRefresh, true);
