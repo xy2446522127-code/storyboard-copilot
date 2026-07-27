@@ -2,6 +2,14 @@
   "schemaVersion": 1,
   "announcements": [
     {
+      "id": "2026-07-27-5-9-25",
+      "title": "5.9.25 文件导入安全修复",
+      "body": "媒体与文档导入现在会在本地再次核对文件类型和分类，错误或伪装文件不会写入项目素材目录。现有项目、媒体和 API 设置不受影响。",
+      "level": "success",
+      "publishedAt": "2026-07-27T13:35:50.027Z",
+      "url": "https://github.com/xy2446522127-code/storyboard-copilot/releases/tag/v5.9.25"
+    },
+    {
       "id": "2026-07-27-5-9-24-api",
       "title": "5.9.24 自定义 API 拉取模型修复",
       "body": "旧自定义 API 卡片现在也能显示拉取模型、搜索与多选写回功能；已保存密钥不会在界面回显。",
