@@ -511,6 +511,17 @@ mod tests {
         assert_eq!(normalized_asset_category("document").unwrap(), "documents");
         assert!(normalized_asset_category("archive").is_err());
     }
+
+    #[test]
+    fn local_file_import_checks_the_category_against_the_file_extension() {
+        assert!(asset_file_name_matches_category("images", "flower.webp"));
+        assert!(asset_file_name_matches_category("videos", "shot.MP4"));
+        assert!(asset_file_name_matches_category("audio", "voice.m4a"));
+        assert!(asset_file_name_matches_category("documents", "outline.docx"));
+        assert!(!asset_file_name_matches_category("images", "archive.exe"));
+        assert!(!asset_file_name_matches_category("documents", "movie.mp4"));
+        assert!(!asset_file_name_matches_category("audio", "no-extension"));
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2227,6 +2238,28 @@ fn normalized_asset_category(value: &str) -> Result<&'static str, String> {
     }
 }
 
+/// The UI classifies a browser `File` before it asks the native side to persist
+/// it, but that classification is not an authorization boundary.  Validate the
+/// supplied display name again before copying bytes into the F-drive library so
+/// a malformed WebView request cannot label an arbitrary executable as an image
+/// or document asset.
+fn asset_file_name_matches_category(category: &str, file_name: &str) -> bool {
+    let extension = file_name
+        .rsplit_once('.')
+        .map(|(_, value)| value.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    if extension.is_empty() {
+        return false;
+    }
+    match category {
+        "images" => matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "avif"),
+        "videos" => matches!(extension.as_str(), "mp4" | "webm" | "mov" | "mkv" | "avi" | "m4v"),
+        "audio" => matches!(extension.as_str(), "mp3" | "wav" | "m4a" | "aac" | "ogg" | "flac"),
+        "documents" => matches!(extension.as_str(), "txt" | "md" | "pdf" | "doc" | "docx"),
+        _ => false,
+    }
+}
+
 #[tauri::command]
 fn import_asset_file(
     app: AppHandle,
@@ -2237,6 +2270,9 @@ fn import_asset_file(
         return Err("asset file name is invalid".to_string());
     }
     let category = normalized_asset_category(&input.category)?;
+    if !asset_file_name_matches_category(category, &input.file_name) {
+        return Err(format!("unsupported file format for {category}"));
+    }
     let mut path = persist_media_source(&app, category, input.source)?;
     let mut persisted = PathBuf::from(&path);
     let requested_extension = input.file_name.rsplit_once('.').map(|(_, extension)| extension).unwrap_or("bin");
