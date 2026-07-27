@@ -2,7 +2,10 @@ import { spawnSync } from "node:child_process";
 
 const repository = "xy2446522127-code/storyboard-copilot";
 const args = process.argv.slice(2);
-const value = (flag) => args[args.indexOf(flag) + 1];
+const value = (flag) => {
+  const index = args.indexOf(flag);
+  return index >= 0 ? args[index + 1] : undefined;
+};
 const title = value("--title");
 const body = value("--body");
 const level = value("--level") || "info";
