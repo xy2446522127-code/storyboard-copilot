@@ -117,11 +117,19 @@ mod tests {
 
     #[test]
     fn automatic_batch_video_node_uses_the_legacy_core_shape() {
-        let node = legacy_batch_video_node("video-new".to_string(), 960.0, 120.0, vec!["a".to_string(), "b".to_string()]);
+        let node = legacy_batch_video_node(
+            "video-new".to_string(),
+            960.0,
+            120.0,
+            vec!["a".to_string(), "b".to_string()],
+            vec!["F:\\media\\a.png".to_string(), "F:\\media\\b.png".to_string()],
+        );
         assert_eq!(node.get("type").and_then(serde_json::Value::as_str), Some("videoNode"));
         let data = node.get("data").expect("video node data");
-        assert_eq!(data.get("videoMode").and_then(serde_json::Value::as_str), Some("image2video"));
+        assert_eq!(data.get("videoMode").and_then(serde_json::Value::as_str), Some("fullReference"));
         assert_eq!(data.get("referenceImageNodeIds").and_then(serde_json::Value::as_array).map(Vec::len), Some(2));
+        assert_eq!(data.get("referenceImageUrls").and_then(serde_json::Value::as_array).map(Vec::len), Some(2));
+        assert_eq!(data.get("firstFrameImage").and_then(serde_json::Value::as_str), Some("F:\\media\\a.png"));
         assert!(data.get("prompt").is_some());
         assert!(data.get("videoUrl").is_some());
     }
@@ -3358,6 +3366,31 @@ fn node_is_kind(node: &serde_json::Value, kind: &str) -> bool {
     }
 }
 
+/// Pulls a displayable image reference from the legacy node data without
+/// depending on one recovered node renderer. Different old image nodes use
+/// `imageUrl`, `previewImageUrl`, or `url`; a batch video must retain the
+/// first usable source for models that only accept a single start frame.
+fn node_image_source(node: &serde_json::Value) -> Option<String> {
+    let data = node.get("data").unwrap_or(node);
+    [
+        "imageUrl",
+        "image_url",
+        "previewImageUrl",
+        "thumbnailUrl",
+        "url",
+        "filePath",
+        "path",
+    ]
+    .iter()
+    .find_map(|key| {
+        data.get(*key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
 fn node_position(node: &serde_json::Value) -> (f64, f64) {
     let position = node.get("position").unwrap_or(&serde_json::Value::Null);
     (
@@ -3394,7 +3427,10 @@ fn legacy_batch_video_node(
     x: f64,
     y: f64,
     reference_image_node_ids: Vec<String>,
+    reference_image_urls: Vec<String>,
 ) -> serde_json::Value {
+    let multiple_references = reference_image_urls.len() > 1;
+    let first_frame_image = reference_image_urls.first().cloned();
     serde_json::json!({
         "id": id,
         "type": "videoNode",
@@ -3416,8 +3452,11 @@ fn legacy_batch_video_node(
             "generationStartedAt": null,
             "generationDurationMs": null,
             "videoUrl": null,
-            "videoMode": "image2video",
-            "referenceImageNodeIds": reference_image_node_ids
+            "videoMode": if multiple_references { "fullReference" } else { "image2video" },
+            "firstFrameImage": first_frame_image,
+            "referenceImageNodeIds": reference_image_node_ids,
+            "referenceImageUrls": reference_image_urls,
+            "requiresMultiReferenceConfirmation": multiple_references
         }
     })
 }
@@ -4677,6 +4716,16 @@ fn apply_canvas_batch_action(
                 .filter(|node| node_is_kind(node, "video"))
                 .filter_map(|node| node_id(node).map(ToOwned::to_owned))
                 .collect::<Vec<_>>();
+            let reference_image_urls = image_ids
+                .iter()
+                .filter_map(|id| {
+                    nodes
+                        .iter()
+                        .find(|node| node_id(node) == Some(id.as_str()))
+                        .and_then(node_image_source)
+                })
+                .collect::<Vec<_>>();
+            let first_frame_image = reference_image_urls.first().cloned();
             let target_id = match (target_video_node_id, selected_videos.len()) {
                 (Some(target), _) if selected_videos.iter().any(|id| id == &target) => target,
                 (Some(_), _) => {
@@ -4701,6 +4750,7 @@ fn apply_canvas_batch_action(
                         max_x + 48.0,
                         if top_y.is_finite() { top_y } else { 0.0 },
                         image_ids.clone(),
+                        reference_image_urls.clone(),
                     ));
                     created_id
                 }
@@ -4742,9 +4792,22 @@ fn apply_canvas_batch_action(
                     serde_json::json!(image_ids),
                 );
                 data.insert(
+                    "referenceImageUrls".to_string(),
+                    serde_json::json!(reference_image_urls),
+                );
+                data.insert(
                     "requiresMultiReferenceConfirmation".to_string(),
                     serde_json::json!(true),
                 );
+                if data
+                    .get("firstFrameImage")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none_or(str::is_empty)
+                {
+                    if let Some(first_frame_image) = first_frame_image {
+                        data.insert("firstFrameImage".to_string(), serde_json::json!(first_frame_image));
+                    }
+                }
             }
         }
         "group" => {

@@ -200,7 +200,7 @@ export function installCanvasBatchTools() {
           if (!Number.isInteger(choice) || !preview.videoTargets[choice - 1]) return;
           targetVideoNodeId = preview.videoTargets[choice - 1].id;
         }
-        if (!window.confirm("将建立批量连线。若没有选中生视频节点，会在图片组右侧新建一个；重复连线会自动跳过。生成前仍需确认模型是否支持多参考图。继续吗？")) return;
+        if (!window.confirm("将建立批量连线。若没有选中生视频节点，会在图片组右侧新建一个；重复连线会自动跳过。新节点会使用“全能参考”模式并保留第一张图作首帧回退：请仅在所选模型支持多参考图时直接生成；不支持时请在视频节点改为“图生视频”，它将只使用第一张图。继续吗？")) return;
       }
       const result = await invoke("apply_canvas_batch_action", {
         projectId,
@@ -209,7 +209,7 @@ export function installCanvasBatchTools() {
         targetVideoNodeId,
       });
       const messages = {
-        "connect-video": "批量连线已保存；视频生成前会要求确认多参考图能力。",
+        "connect-video": "批量连线已保存；新视频节点会向支持“全能参考”的模型传入全部图片，并保留首帧回退。",
         "arrange-horizontal": "横向排列已保存；可从画布历史撤销。",
         "arrange-vertical": "纵向排列已保存；可从画布历史撤销。",
         "arrange-connected": "已按连线顺序排列；无连线节点保持稳定顺序。",
