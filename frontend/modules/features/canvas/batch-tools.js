@@ -3,6 +3,62 @@ import { flowNodeSelector, invoke, selectedFlowNodeIds, selectedFlowNodes, toast
 const LEGACY_SAVE_TIMEOUT_MS = 4_000;
 const LEGACY_SAVE_POLL_MS = 120;
 
+function saveLegacyCanvas() {
+  const button = [...document.querySelectorAll("button")]
+    .find((candidate) => (candidate.textContent || "").trim() === "保存画布");
+  if (!button || button.disabled) return false;
+  button.click();
+  return true;
+}
+
+/**
+ * Resolves the exact legacy project that owns a selected node set after asking
+ * the recovered canvas to save. It deliberately never falls back to the most
+ * recent project: a stale save must not put a user's batch edit in another
+ * storyboard.
+ *
+ * The dependency parameters make the compatibility boundary testable without
+ * constructing a WebView or replacing the legacy canvas.
+ */
+export async function resolveProjectAfterLegacySave({
+  nodeIds,
+  invokeCommand = invoke,
+  saveCanvas = saveLegacyCanvas,
+  timeoutMs = LEGACY_SAVE_TIMEOUT_MS,
+  knownProjectTimeoutMs = 900,
+  pollMs = LEGACY_SAVE_POLL_MS,
+  wait = (milliseconds) => new Promise((resolve) => window.setTimeout(resolve, milliseconds)),
+} = {}) {
+  if (!nodeIds?.length) return null;
+  const before = await invokeCommand("list_project_summaries");
+  const beforeUpdatedAt = new Map(before.map((project) => [project.id, project.updatedAt]));
+  // A selection whose ids are already present in exactly one stored project
+  // is a safe identity anchor. Some versions of the recovered canvas skip a
+  // database write when its Save button is pressed while the graph is clean;
+  // relying only on `updatedAt` then made every batch action incorrectly say
+  // that the project had not been saved.
+  const knownProjectId = await invokeCommand("find_project_for_canvas_selection", { nodeIds })
+    .catch(() => null);
+  if (!saveCanvas()) return undefined;
+  // Existing selections already identify their project. Give a normal save a
+  // short chance to persist recent moves, but do not impose a four-second
+  // false "unsaved" delay on an otherwise clean canvas.
+  const deadline = Date.now() + (knownProjectId ? knownProjectTimeoutMs : timeoutMs);
+  while (Date.now() < deadline) {
+    await wait(pollMs);
+    const projectId = await invokeCommand("find_project_for_canvas_selection", { nodeIds });
+    if (!projectId) continue;
+    const projects = await invokeCommand("list_project_summaries");
+    const project = projects.find((candidate) => candidate.id === projectId);
+    if (project && beforeUpdatedAt.get(project.id) !== project.updatedAt) return projectId;
+  }
+  // Do not guess the newest project. Only fall back to the exact project that
+  // already contained every selected node before the save request. This keeps
+  // clean, previously saved canvases usable while still refusing ambiguous or
+  // newly-created selections that were never persisted.
+  return knownProjectId || null;
+}
+
 export function installCanvasBatchTools() {
   const toolbar = document.createElement("div");
   toolbar.id = "huahai-canvas-batch-tools";
@@ -89,47 +145,6 @@ export function installCanvasBatchTools() {
     window.clearTimeout(refreshTimer);
     refreshTimer = window.setTimeout(refresh, 40);
   };
-  const saveLegacyCanvas = () => {
-    const button = [...document.querySelectorAll("button")]
-      .find((candidate) => (candidate.textContent || "").trim() === "保存画布");
-    if (!button || button.disabled) return false;
-    button.click();
-    return true;
-  };
-  const savedProjectForSelection = async (nodeIds) => {
-    if (!nodeIds.length) return null;
-    const before = await invoke("list_project_summaries");
-    const beforeUpdatedAt = new Map(before.map((project) => [project.id, project.updatedAt]));
-    // A selection whose ids are already present in exactly one stored project
-    // is a safe identity anchor. Some versions of the recovered canvas skip a
-    // database write when its Save button is pressed while the graph is clean;
-    // relying only on `updatedAt` then made every batch action incorrectly say
-    // that the project had not been saved.
-    const knownProjectId = await invoke("find_project_for_canvas_selection", { nodeIds })
-      .catch(() => null);
-    if (!saveLegacyCanvas()) return undefined;
-    // The legacy canvas does not expose a save-complete event.  Do not assume a
-    // fixed delay is enough: wait for the project containing this exact current
-    // selection to receive a new persisted timestamp before changing its canvas
-    // from the compatibility plug-in.
-    // Existing selections already identify their project. Give a normal save a
-    // short chance to persist recent moves, but do not impose a four-second
-    // false "unsaved" delay on an otherwise clean canvas.
-    const deadline = Date.now() + (knownProjectId ? 900 : LEGACY_SAVE_TIMEOUT_MS);
-    while (Date.now() < deadline) {
-      await new Promise((resolve) => window.setTimeout(resolve, LEGACY_SAVE_POLL_MS));
-      const projectId = await invoke("find_project_for_canvas_selection", { nodeIds });
-      if (!projectId) continue;
-      const projects = await invoke("list_project_summaries");
-      const project = projects.find((candidate) => candidate.id === projectId);
-      if (project && beforeUpdatedAt.get(project.id) !== project.updatedAt) return projectId;
-    }
-    // Do not guess the newest project. Only fall back to the exact project that
-    // already contained every selected node before the save request. This keeps
-    // clean, previously saved canvases usable while still refusing ambiguous or
-    // newly-created selections that were never persisted.
-    return knownProjectId || null;
-  };
   document.addEventListener("pointerup", delayedRefresh, true);
   document.addEventListener("keyup", delayedRefresh, true);
   const selectionObserver = new MutationObserver((mutations) => {
@@ -169,7 +184,7 @@ export function installCanvasBatchTools() {
     }
     try {
       const nodeIds = selectedFlowNodeIds();
-      const projectId = await savedProjectForSelection(nodeIds);
+      const projectId = await resolveProjectAfterLegacySave({ nodeIds });
       if (projectId === undefined) {
         toast("请先使用旧画布顶部的“保存画布”保存项目，再进行批量操作。", "info");
         return;

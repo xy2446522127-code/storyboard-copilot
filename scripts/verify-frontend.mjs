@@ -67,7 +67,7 @@ if (!blankCanvasDrop.includes("LEGACY_SAVE_TIMEOUT_MS") || blankCanvasDrop.inclu
 }
 
 const batchTools = readFileSync(resolve(root, "frontend/modules/features/canvas/batch-tools.js"), "utf8");
-if (!batchTools.includes("savedProjectForSelection") || !batchTools.includes("LEGACY_SAVE_TIMEOUT_MS")) {
+if (!batchTools.includes("resolveProjectAfterLegacySave") || !batchTools.includes("LEGACY_SAVE_TIMEOUT_MS")) {
   throw new Error("Canvas batch tools must wait for the legacy save instead of using a fixed persistence delay.");
 }
 if (batchTools.includes("await new Promise((resolve) => window.setTimeout(resolve, 650));")) {
